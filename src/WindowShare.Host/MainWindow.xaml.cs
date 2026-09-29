@@ -327,7 +327,10 @@ public partial class MainWindow : Window
             }
             catch (Exception ex)
             {
-                Logger.Warn("Host", $"信令注册失败: {ex.Message}");
+                // 日志与状态栏用同一份「可照着排查」的文案：只写原始异常消息时，
+                // 「由于目标计算机积极拒绝，无法连接」看着像共享失败，实际只是房间号模式没连上。
+                Logger.Warn("Host", HostSignalingClient.DescribeConnectFailure(url, ex) +
+                                    "｜共享照常进行，仅房间号模式不可用；启动信令服务器后点「重试」即可");
                 DisposeSignaling();
                 SetSignalingState(HostSignalingClient.DescribeConnectFailure(url, ex) +
                                   "｜局域网直连共享不受影响", SignalingUiState.Error);

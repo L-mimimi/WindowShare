@@ -323,6 +323,10 @@ public static class Program
     long decodedFrames = 0;
     long decodableFrames = 0;
     var firstKeyframeSeen = false;
+    // GOP 补发是否生效：观看者收到的第一帧就应该是补发的 IDR
+    var firstFrameIsKeyframe = false;
+    var gopCacheReady = false;
+    var cachedFramesAtConnect = 0;
     var rttMs = double.NaN;
     var state = (ConnectionState)(-1);
     var connectedEvent = new ManualResetEventSlim(false);
@@ -338,7 +342,8 @@ public static class Program
     };
     client.FrameReceived += f =>
     {
-        Interlocked.Increment(ref receivedFrames);
+        if (Interlocked.Increment(ref receivedFrames) == 1)
+            Volatile.Write(ref firstFrameIsKeyframe, AnnexB.IsKeyframe(f.Data));
         stats.OnFrame(f.Data.Length);
         // 首个 IDR 之前的帧没有参考帧，按设计解不出来（Viewer 端同样丢弃），
         // 因此断言用「首个 IDR 之后的可解码帧」做分母，而不是「收到的帧」。
@@ -353,6 +358,10 @@ public static class Program
         client.RttUpdated += r => rttMs = r;
         // 解码回调必须在 Start 之前挂好：否则连接建立后头几帧解出来了却没被计数
         decoder.Decoded += d => Interlocked.Increment(ref decodedFrames);
+        // 等服务器攒出一个以 IDR 开头的 GOP 再连：否则补发无内容，首帧断言会偶发失败
+        gopCacheReady = SpinWait.SpinUntil(() => server.CachedGopFrames > 0, TimeSpan.FromSeconds(10));
+        cachedFramesAtConnect = server.CachedGopFrames;
+        Logger.Info("Part4", $"连接前 GOP 缓存就绪={gopCacheReady}（{cachedFramesAtConnect} 帧）");
         client.Start();
 
         var connected = connectedEvent.Wait(TimeSpan.FromSeconds(10));
@@ -376,13 +385,17 @@ public static class Program
     var (bitrate, fps, _) = stats.Tick();
     Logger.Info("Part4", $"连接={connected}, 状态={state}, 加密={encEnabled}, " +
                         $"收到 {receivedFrames} 帧, 首个 IDR 后可解码 {Interlocked.Read(ref decodableFrames)} 帧, 解码 {decodedFrames} 帧, " +
+                        $"首帧即 IDR={Volatile.Read(ref firstFrameIsKeyframe)}, GOP 缓存就绪={gopCacheReady}({cachedFramesAtConnect} 帧), " +
                         $"抽干补出 {flushed} 帧, {decodeDiag}, " +
                         $"码率≈{bitrate / 1000:F0}kbps, RTT={rttMs:F1}ms");
 
         // 比例断言而非绝对帧数：GDI 定速捕获 6 秒约 180 帧，但实际帧率仍受机器负载影响，
         // 绝对阈值（旧值 received>60 / decoded>30）会造成偶发失败。
+        // 首帧必须是 IDR：编码器不认 ForceKeyFrame（本机 DX12 编码器实测 E_NOTIMPL），
+        // 观看者能秒开完全依赖服务器补发缓存 GOP，这条断言就是它的回归网。
         var decodable = Interlocked.Read(ref decodableFrames);
-        var pass = connected && encEnabled && Volatile.Read(ref firstKeyframeSeen) &&
+        var pass = connected && encEnabled && gopCacheReady &&
+                   Volatile.Read(ref firstFrameIsKeyframe) && Volatile.Read(ref firstKeyframeSeen) &&
                    receivedFrames >= 40 && decodable >= 30 && decodedFrames >= decodable * 9 / 10;
         Logger.Info("Part4", pass ? "Part4 PASS" : "Part4 FAIL");
     return pass;

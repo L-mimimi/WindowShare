@@ -28,12 +28,26 @@
 | 4 | AuthResult | H→V | JSON：ok/reason/enc/encoder/width/height |
 | 10 | Ping | V→H | 8 字节时间戳 |
 | 11 | Pong | H→V | 原样返回（V 计算 RTT） |
-| 12 | KeyframeRequest | V→H | 空（Host 强制下一帧为 IDR） |
+| 12 | KeyframeRequest | V→H | 空（Host 请求下一帧为 IDR；部分编码器不认该 CODECAPI，此时由 GOP 补发兜底，见下） |
 | 13 | Bye | 双向 | 空（优雅断开） |
 | 14 | ShareStopped | H→V | JSON：reason |
 | 15 | StatsInfo | 双向 | JSON：H→V encoder/hw/source；V→H rttMs（拥塞反馈） |
 | 20 | VideoFrame | H→V | H.264 Annex-B 访问单元（1 帧） |
 | 21 | RawFrame | H→V | 未编码 BGRA（仅测试通路用） |
+
+### 关键帧与「接入即出画面」
+
+Host 侧 `LanShareServer` 维护一份 GOP 缓存（`Core/Encoding/GopCache.cs`）：保存自上一个 IDR
+以来的全部编码帧。观看者认证通过的瞬间，Host 先把这段缓存整帧补发过去，再接着发实时帧——
+因此观看者收到的第一帧必定是 IDR，画面当场可解。
+
+这么做的原因：`CODECAPI_AVEncVideoForceKeyFrame` 并非所有编码器都实现（本机实测
+`Microsoft AVC DX12 Encoder` 与软件 `H264 Encoder MFT` 均返回 `E_NOTIMPL`），
+此时 IDR 只按编码器内部 GOP 周期出现；静态桌面下实际帧率很低（WGC 约 8fps），
+一个 GOP 可能横跨数秒，光靠 `KeyframeRequest` 会让新观看者黑屏干等。
+
+补发与实时分发共用同一把锁，保证「补发的最后一帧」与「随后直发的第一帧」严格有序、不重不漏。
+缓存超过 24 MB 或 600 帧即整段作废，等下一个 IDR 重新积累；分辨率切换同样作废。
 
 ## 2. 认证流程
 

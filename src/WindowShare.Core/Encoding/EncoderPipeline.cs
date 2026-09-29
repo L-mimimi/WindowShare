@@ -160,7 +160,7 @@ public sealed class EncoderPipeline : IDisposable
             _keyFrameRequestWarned = true;
             Logger.Warn("Pipeline",
                 $"编码器不认 CODECAPI_AVEncVideoForceKeyFrame（{EncoderName}）：" +
-                "关键帧只按 GOP 周期出现，新接入的观看者可能要多等一会儿");
+                "关键帧只按编码器内部 GOP 周期出现；分发端已改为给新观看者补发缓存 GOP，接入即出画面");
         }
         return ok;
     }

@@ -18,7 +18,8 @@ public sealed record ViewerInfo(string DeviceId, string DeviceName, string Remot
 ///   - 接入认证：AuthRequest → 白名单检查（首次弹批准）→ AuthChallenge → AuthProof 校验 → AuthResult；
 ///   - 可选 ECDH+AES-GCM 会话加密（认证证明绑定双方公钥）；
 ///   - 编码帧分发：每连接有界队列（慢消费者丢帧，不拖累其他观看者）；
-///   - 新观看者自动请求关键帧；处理 Ping/KeyframeRequest/Bye。
+///   - 新观看者接入时补发缓存的 GOP（自上一个 IDR 起的全部帧），编码器不认关键帧请求也能秒开；
+///   - 同时仍请求关键帧；处理 Ping/KeyframeRequest/Bye。
 /// 只读共享协议：不存在任何输入/控制消息。
 /// </summary>
 public sealed class LanShareServer : ShareSession.IFrameSink, IDisposable
@@ -33,6 +34,10 @@ public sealed class LanShareServer : ShareSession.IFrameSink, IDisposable
     private Timer? _congestionTimer;
     private readonly List<ClientSession> _clients = new();
     private readonly object _clientsGate = new();
+    // GOP 缓存 + 专用锁：观看者接入时把「自上一个 IDR 起的帧」整段补发过去。
+    // 锁的用途见 OnEncodedFrame / MarkAuthenticated 的注释（保证补发与直发严格有序）。
+    private readonly GopCache _gopCache = new();
+    private readonly object _gopGate = new();
 
     /// <summary>新观看者需要批准（返回 true 允许；Host UI 弹窗实现）</summary>
     public Func<ViewerInfo, Task<bool>>? ApproveRequired;
@@ -112,6 +117,7 @@ public sealed class LanShareServer : ShareSession.IFrameSink, IDisposable
         _congestionTimer = null;
         _controller = null;
         try { _listener?.Stop(); } catch { }
+        lock (_gopGate) _gopCache.Clear();
         lock (_clientsGate)
         {
             foreach (var c in _clients) c.Close();
@@ -126,19 +132,31 @@ public sealed class LanShareServer : ShareSession.IFrameSink, IDisposable
 
     public void OnEncodedFrame(EncodedVideoFrame frame)
     {
-        List<ClientSession> targets;
-        lock (_clientsGate)
-            targets = _clients.Where(c => c.Authenticated).ToList();
-
-        foreach (var c in targets)
+        // 追加缓存与分发必须在同一把锁内：否则「给新观看者补发的最后一帧」与
+        // 「给老观看者直发的同一帧」会交错，新观看者可能收到重复帧或缺参考帧而花屏。
+        // 入队是 BlockingCollection.TryAdd（非阻塞），持锁时间可忽略；日志挪到锁外。
+        var slowClients = new List<ClientSession>();
+        lock (_gopGate)
         {
-            if (!c.TryEnqueueFrame(frame))
+            _gopCache.Add(frame);
+
+            List<ClientSession> targets;
+            lock (_clientsGate)
+                targets = _clients.Where(c => c.Authenticated).ToList();
+
+            foreach (var c in targets)
             {
-                // 队列满：丢弃该观看者的一帧（关键帧到来前可能有花屏，关键帧恢复）
-                if (Interlocked.Increment(ref c.DroppedFrames) % 60 == 1)
-                    Logging.Logger.Warn("LanServer", $"观看者 {c.DeviceName} 消费慢，开始丢帧");
+                if (!c.TryEnqueueFrame(frame))
+                {
+                    // 队列满：丢弃该观看者的一帧（下一个 IDR 到来前可能有花屏，之后恢复）
+                    if (Interlocked.Increment(ref c.DroppedFrames) % 60 == 1)
+                        slowClients.Add(c);
+                }
             }
         }
+
+        foreach (var c in slowClients)
+            Logging.Logger.Warn("LanServer", $"观看者 {c.DeviceName} 消费慢，开始丢帧");
     }
 
     public void OnShareStopped(string reason)
@@ -160,6 +178,34 @@ public sealed class LanShareServer : ShareSession.IFrameSink, IDisposable
 
     /// <summary>请求向所有观看者发送关键帧</summary>
     private void RequestKeyframe() => _session.RequestKeyframe();
+
+    /// <summary>当前 GOP 缓存的帧数（诊断 / 测试用）</summary>
+    public int CachedGopFrames
+    {
+        get { lock (_gopGate) return _gopCache.Count; }
+    }
+
+    /// <summary>
+    /// 标记观看者已认证，并立刻把缓存的 GOP（自上一个 IDR 起的全部帧）补发给它。
+    /// 编码器可能不认 CODECAPI_AVEncVideoForceKeyFrame（本机 Microsoft AVC DX12 Encoder 实测如此），
+    /// 此时 IDR 只按编码器内部 GOP 周期出现，静态桌面下可能要黑屏等好几秒；补发缓存即可秒开。
+    /// 必须与 OnEncodedFrame 共用 _gopGate，保证补发的最后一帧与随后直发的第一帧不重不漏。
+    /// </summary>
+    private void MarkAuthenticated(ClientSession client)
+    {
+        EncodedVideoFrame[] replay;
+        lock (_gopGate)
+        {
+            client.Authenticated = true;
+            replay = _gopCache.GetReplayFrames();
+            foreach (var f in replay)
+                client.TryEnqueueFrame(f);
+        }
+
+        Logging.Logger.Info("LanServer", replay.Length > 0
+            ? $"已为 {client.DeviceName} 补发缓存 GOP {replay.Length} 帧（接入即出画面，无需等待下一个关键帧）"
+            : $"GOP 缓存为空，{client.DeviceName} 需等待下一个关键帧");
+    }
 
     // ===== 接入循环 =====
 
@@ -336,7 +382,7 @@ public sealed class LanShareServer : ShareSession.IFrameSink, IDisposable
             });
             conn.Send(MessageType.AuthResult, FrameFlags.None, result);
 
-            client.Authenticated = true;
+            MarkAuthenticated(client);
             Logging.Logger.Info("LanServer", $"观看者接入成功: {client.DeviceName} ({client.RemoteAddress}) 加密={encEnabled}");
             return true;
         }, ct);
