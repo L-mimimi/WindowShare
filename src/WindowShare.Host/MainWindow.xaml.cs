@@ -2,7 +2,9 @@ using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media.Imaging;
+using System.Windows.Threading;
 using WindowShare.Core.Capture;
+using WindowShare.Core.Encoding;
 using WindowShare.Core.Logging;
 using WindowShare.Core.Network;
 using WindowShare.Core.Security;
@@ -32,23 +34,98 @@ public partial class MainWindow : Window
     private readonly HashSet<string> _preApprovedDevices = new();
     private CaptureSource? _selectedSource;
     private WriteableBitmap? _previewBitmap;
+    private readonly DispatcherTimer _infoTimer;
+    /// <summary>信令房间是否已注册成功（与「是否勾选」区分：勾选但未连上时显示重试入口）</summary>
+    private bool _signalingReady;
+    /// <summary>房间号被占用时的换号重试次数</summary>
+    private const int SignalingRegisterRetries = 3;
 
-    private static readonly (string Name, int Width, int Bitrate)[] QualityPresets =
+    /// <summary>
+    /// 分辨率档位（只定义目标宽度；高度按源宽高比等比推导，最高 4K）。
+    /// 码率不写死，由 <see cref="VideoFormatPlanner.SuggestBitrateBps"/> 按分辨率×帧率自动推算。
+    /// </summary>
+    private static readonly (string Name, int Width)[] ResolutionPresets =
     {
-        ("高清 1080p / 4 Mbps", 1920, 4_000_000),
-        ("均衡 720p / 2.5 Mbps", 1280, 2_500_000),
-        ("流畅 540p / 1.2 Mbps", 960, 1_200_000),
+        ("4K 超高清 (3840)", 3840),
+        ("2K (2560)", 2560),
+        ("1080p 全高清 (1920)", 1920),
+        ("720p 高清 (1280)", 1280),
+        ("540p 流畅 (960)", 960),
     };
+
+    private const int DefaultResolutionIndex = 2;   // 1080p
+    private const int DefaultFps = 30;
 
     public MainWindow()
     {
         InitializeComponent();
         InitializeSources();
-        CboQuality.ItemsSource = QualityPresets.Select(q => q.Name).ToList();
-        CboQuality.SelectedIndex = 1;
+        CboResolution.ItemsSource = ResolutionPresets.Select(r => r.Name).ToList();
+        CboResolution.SelectedIndex = DefaultResolutionIndex;
+        CboFps.ItemsSource = VideoFormatPlanner.FpsTiers.Select(f => $"{f} fps").ToList();
+        CboFps.SelectedIndex = Math.Max(0, Array.IndexOf(VideoFormatPlanner.FpsTiers, DefaultFps));
+        _infoTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+        _infoTimer.Tick += (_, _) => RefreshOutputInfo();
         ShowModeInfo();
+        UpdateBitrateHint();
         Logger.LogEmitted += OnLogEmitted;
-        Closing += (_, _) => Logger.LogEmitted -= OnLogEmitted;
+        Closing += (_, _) =>
+        {
+            _infoTimer.Stop();
+            Logger.LogEmitted -= OnLogEmitted;
+        };
+    }
+
+    // ===== 画质档位（分辨率 / 帧率 / 自动码率）=====
+
+    /// <summary>所选目标宽度（档位值；实际输出还受源尺寸约束，不上采样）</summary>
+    private int SelectedWidth =>
+        ResolutionPresets[Math.Clamp(CboResolution.SelectedIndex, 0, ResolutionPresets.Length - 1)].Width;
+
+    /// <summary>所选帧率档位（24/30/60/90/120/144）</summary>
+    private int SelectedFps =>
+        VideoFormatPlanner.FpsTiers[Math.Clamp(CboFps.SelectedIndex, 0, VideoFormatPlanner.FpsTiers.Length - 1)];
+
+    private void Quality_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (TxtBitrateHint == null) return;   // InitializeComponent 期间可能早于其他控件
+        UpdateBitrateHint();
+    }
+
+    private void Source_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (TxtBitrateHint == null) return;
+        UpdateBitrateHint();
+    }
+
+    /// <summary>按「所选分辨率 × 帧率 × 源宽高比」推算码率并展示</summary>
+    private void UpdateBitrateHint()
+    {
+        var source = GetSelectedSource();
+        var (width, height) = VideoFormatPlanner.FitToWidth(
+            source?.Bounds.Width ?? SelectedWidth,
+            source?.Bounds.Height ?? SelectedWidth * 9 / 16,
+            SelectedWidth);
+        var bitrate = VideoFormatPlanner.SuggestBitrateBps(width, height, SelectedFps);
+        TxtBitrateHint.Text = $"码率 ≈ {bitrate / 1_000_000.0:F1} Mbps（自动）";
+        TxtBitrateHint.ToolTip =
+            $"按 {width}×{height}@{SelectedFps}fps 自动推算，无需手动设置。\n" +
+            "实际输出分辨率不会超过共享源尺寸（不做上采样）；网络拥塞时会自动降码率/降分辨率。";
+    }
+
+    /// <summary>每秒刷新实际编码输出（动态降档后会与所选档位不同）</summary>
+    private void RefreshOutputInfo()
+    {
+        var session = _session;
+        if (session is not { IsSharing: true })
+        {
+            TxtOutput.Text = "";
+            return;
+        }
+        var (width, height) = session.OutputSize;
+        TxtOutput.Text = width > 0
+            ? $"输出 {width}×{height}@{session.Options?.Fps ?? 0}fps"
+            : "";
     }
 
     /// <summary>显示运行模式（便携/安装）与数据目录</summary>
@@ -129,12 +206,15 @@ public partial class MainWindow : Window
         }
         _selectedSource = source;
 
-        var preset = QualityPresets[Math.Max(0, CboQuality.SelectedIndex)];
+        // 分辨率档位只给目标宽度：高度按源宽高比等比推导，源比档位小时不上采样。
+        var (plannedWidth, plannedHeight) = VideoFormatPlanner.FitToWidth(
+            source.Bounds.Width, source.Bounds.Height, SelectedWidth);
+        var fps = SelectedFps;
         var options = new ShareOptions
         {
-            Width = preset.Width,
-            Fps = 30,
-            BitrateBps = preset.Bitrate,
+            Width = SelectedWidth,
+            Fps = fps,
+            BitrateBps = VideoFormatPlanner.SuggestBitrateBps(plannedWidth, plannedHeight, fps),
             RecordForValidation = ChkRecord.IsChecked == true,
             RecordFilePath = Path.Combine(AppPaths.Recordings, $"share-{DateTime.Now:yyyyMMdd-HHmmss}.h264"),
         };
@@ -155,28 +235,6 @@ public partial class MainWindow : Window
         {
             _session.Start(source, options);
             _server.Start();
-
-            // 信令服务器（房间号模式）：注册房间，观看者凭房间号+密码加入
-            if (ChkSignaling.IsChecked == true && !string.IsNullOrWhiteSpace(TxtSignalingUrl.Text))
-            {
-                _signaling = new HostSignalingClient(TxtSignalingUrl.Text.Trim());
-                _signaling.ViewerJoinRequested += OnSignalingViewerJoin;
-                _signaling.RelayFromViewer += OnRelayFromViewer;
-                var registered = await _signaling.RegisterAsync(
-                    _session.RoomCode, _session.Password,
-                    Environment.MachineName,
-                    LocalEndpoints.GetLanEndpoints(LanShareServer.DefaultPort));
-                if (registered)
-                {
-                    TxtSignalingState.Text = "已连接 ✓";
-                    TxtSignalingState.Foreground =
-                        new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0x43, 0xA0, 0x47));
-                }
-                else
-                {
-                    TxtSignalingState.Text = "房间号被占用";
-                }
-            }
         }
         catch (Exception ex)
         {
@@ -196,6 +254,8 @@ public partial class MainWindow : Window
         BtnToggleShare.Background = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0xE5, 0x39, 0x35));
         BtnStop.Visibility = Visibility.Visible;
         TxtPreviewHint.Visibility = Visibility.Collapsed;
+        _infoTimer.Start();
+        RefreshOutputInfo();
 
         // 悬浮共享指示条 + 窗口红框（隐私提示）
         _overlay = new OverlayWindow(source, _session);
@@ -205,9 +265,141 @@ public partial class MainWindow : Window
             _borderOverlay = new WindowBorderOverlay(source.Handle);
             _borderOverlay.Show();
         }
+
+        // 信令（房间号模式）在共享已起来之后再连：连接失败只降级为「仅局域网直连」，
+        // 绝不回滚已经开始的共享（旧行为会把整个共享流程判定为失败并停止）。
+        if (ChkSignaling.IsChecked == true)
+            await StartSignalingAsync();
     }
 
     private void BtnStop_Click(object sender, RoutedEventArgs e) => StopSharing("一键停止");
+
+    // ===== 信令服务器（房间号模式）=====
+
+    private enum SignalingUiState { Pending, Ok, Error, Off }
+
+    /// <summary>
+    /// 注册信令房间。与共享生命周期解耦：服务器不可达、地址写错、房间号被占用都只影响
+    /// 房间号模式，局域网直连共享照常进行；界面给出可照着排查的原因与「重试」入口。
+    /// </summary>
+    private async System.Threading.Tasks.Task StartSignalingAsync()
+    {
+        var session = _session;
+        if (session is not { IsSharing: true }) return;
+
+        var url = TxtSignalingUrl.Text.Trim();
+        if (!url.StartsWith("http://", StringComparison.OrdinalIgnoreCase) &&
+            !url.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+        {
+            Logger.Warn("Host", $"信令地址无效: {url}");
+            SetSignalingState($"地址需以 http:// 或 https:// 开头（当前：{(url.Length == 0 ? "空" : url)}）",
+                SignalingUiState.Error);
+            return;
+        }
+
+        for (var attempt = 1; attempt <= SignalingRegisterRetries; attempt++)
+        {
+            if (_session is not { IsSharing: true }) return;   // 期间已停止共享
+            if (_signaling == null)
+            {
+                _signaling = new HostSignalingClient(url);
+                _signaling.ViewerJoinRequested += OnSignalingViewerJoin;
+                _signaling.RelayFromViewer += OnRelayFromViewer;
+            }
+
+            SetSignalingState($"连接中…（{attempt}/{SignalingRegisterRetries}）", SignalingUiState.Pending);
+            try
+            {
+                var registered = await _signaling.RegisterAsync(_session.RoomCode, _session.Password,
+                    Environment.MachineName, LocalEndpoints.GetLanEndpoints(LanShareServer.DefaultPort));
+                if (registered)
+                {
+                    SetSignalingState($"已连接 ✓ 房间 {_session.RoomCode}", SignalingUiState.Ok);
+                    return;
+                }
+
+                // 服务器拒绝（房间号被占用）→ 轮换会话凭据后重试，已接入的观看者不受影响
+                var (newRoom, newPassword) = _session.RotateCredentials();
+                TxtRoomCode.Text = newRoom;
+                TxtPassword.Text = newPassword;
+                SetSignalingState($"房间号被占用，已换号 {newRoom}（{attempt}/{SignalingRegisterRetries}）",
+                    SignalingUiState.Pending);
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn("Host", $"信令注册失败: {ex.Message}");
+                DisposeSignaling();
+                SetSignalingState(HostSignalingClient.DescribeConnectFailure(url, ex) +
+                                  "｜局域网直连共享不受影响", SignalingUiState.Error);
+                return;
+            }
+
+            await System.Threading.Tasks.Task.Delay(200);
+        }
+
+        DisposeSignaling();
+        SetSignalingState($"房间号连续 {SignalingRegisterRetries} 次被占用，请稍后点「重试」｜局域网直连共享不受影响",
+            SignalingUiState.Error);
+    }
+
+    /// <summary>更新信令状态文字与配色；出错时露出「重试」按钮</summary>
+    private void SetSignalingState(string text, SignalingUiState state)
+    {
+        TxtSignalingState.Text = text;
+        TxtSignalingState.ToolTip = text;
+        TxtSignalingState.Foreground = new System.Windows.Media.SolidColorBrush(state switch
+        {
+            SignalingUiState.Ok => System.Windows.Media.Color.FromRgb(0x43, 0xA0, 0x47),
+            SignalingUiState.Error => System.Windows.Media.Color.FromRgb(0xE5, 0x39, 0x35),
+            SignalingUiState.Pending => System.Windows.Media.Color.FromRgb(0xE8, 0x8B, 0x00),
+            _ => System.Windows.Media.Color.FromRgb(0x88, 0x88, 0x88),
+        });
+        _signalingReady = state == SignalingUiState.Ok;
+        BtnSignalingRetry.Visibility = state == SignalingUiState.Error ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    /// <summary>运行中勾选/取消信令：即时生效，无需重新开始共享</summary>
+    private void ChkSignaling_Changed(object sender, RoutedEventArgs e)
+    {
+        if (TxtSignalingState == null) return;   // InitializeComponent 期间
+        if (_session is not { IsSharing: true })
+        {
+            SetSignalingState(ChkSignaling.IsChecked == true ? "将在开始共享时连接" : "未启用",
+                SignalingUiState.Off);
+            return;
+        }
+        if (ChkSignaling.IsChecked == true) _ = StartSignalingAsync();
+        else
+        {
+            DisposeSignaling();
+            SetSignalingState("未启用", SignalingUiState.Off);
+        }
+    }
+
+    private void BtnSignalingRetry_Click(object sender, RoutedEventArgs e)
+    {
+        if (_session is not { IsSharing: true })
+        {
+            MessageBox.Show("请先「开始共享」，再连接信令服务器。", "提示",
+                MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        _ = StartSignalingAsync();
+    }
+
+    /// <summary>释放信令客户端（关闭房间 + 断开连接），不触碰共享会话本身</summary>
+    private void DisposeSignaling()
+    {
+        var signaling = _signaling;
+        _signaling = null;
+        _signalingReady = false;
+        if (signaling == null) return;
+        _ = System.Threading.Tasks.Task.Run(async () =>
+        {
+            try { await signaling.StopSharingAsync(); }
+            finally { await signaling.DisposeAsync(); }
+        });
+    }
 
     /// <summary>信令中继消息处理：观看者跨网段时发起 WebRTC（SDP/ICE 中继）</summary>
     private async void OnRelayFromViewer(string? viewerId, string type, string payload)
@@ -339,6 +531,7 @@ public partial class MainWindow : Window
         _server = null;
         _whitelist = null;
         _preApprovedDevices.Clear();
+        _infoTimer.Stop();
 
         if (_webRtcSink != null)
         {
@@ -349,17 +542,7 @@ public partial class MainWindow : Window
         _webRtcSender = null;
         if (oldSender != null) _ = oldSender.DisposeAsync();
 
-        var signaling = _signaling;
-        _signaling = null;
-        if (signaling != null)
-        {
-            Dispatcher.BeginInvoke(() => TxtSignalingState.Text = "未启用");
-            _ = Task.Run(async () =>
-            {
-                try { await signaling.StopSharingAsync(); }
-                finally { await signaling.DisposeAsync(); }
-            });
-        }
+        DisposeSignaling();
 
         if (_session != null)
         {
@@ -378,6 +561,9 @@ public partial class MainWindow : Window
             TxtPassword.Text = "";
             TxtEncoder.Text = "编码器：未启动";
             TxtStats.Text = "观看者：0";
+            TxtOutput.Text = "";
+            SetSignalingState(ChkSignaling.IsChecked == true ? "将在开始共享时连接" : "未启用",
+                SignalingUiState.Off);
         });
     }
 
@@ -413,8 +599,13 @@ public partial class MainWindow : Window
     private void BtnCopy_Click(object sender, RoutedEventArgs e)
     {
         if (string.IsNullOrEmpty(TxtRoomCode.Text)) return;
-        var invite = $"【窗享邀请】房间号 {TxtRoomCode.Text}  密码 {TxtPassword.Text}\n" +
-                     "打开 窗享 Viewer，输入房间号和密码即可观看（只读共享）。";
+        // 信令已注册成功 → 观看端走「房间号」；否则只能同局域网「直连 IP」
+        var invite = _signalingReady
+            ? $"【窗享邀请】房间号 {TxtRoomCode.Text}  密码 {TxtPassword.Text}\n" +
+              $"信令服务器 {TxtSignalingUrl.Text.Trim()}\n" +
+              "打开 窗享 Viewer → 选「房间号」→ 填入房间号 / 密码 / 信令地址即可观看（只读共享）。"
+            : $"【窗享邀请】密码 {TxtPassword.Text}\n" +
+              "打开 窗享 Viewer → 选「直连 IP」→ 填入本机 IP、端口 48750 与以上密码即可观看（需同一局域网，只读共享）。";
         try
         {
             Clipboard.SetText(invite);
@@ -425,8 +616,6 @@ public partial class MainWindow : Window
             Logger.Warn("Host", "复制失败: " + ex.Message);
         }
     }
-
-    private void CboQuality_SelectionChanged(object sender, SelectionChangedEventArgs e) { }
 
     private void Window_Closing(object sender, System.ComponentModel.CancelEventArgs e)
     {

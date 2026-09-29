@@ -78,6 +78,9 @@ public sealed class MfH264Encoder : IDisposable
     public bool IsD3DAccelerated => _d3dManager != null;
     public bool IsAsyncMode => _asyncEventGenerator != null;
 
+    /// <summary>实际下发给编码器的 H.264 Level（eAVEncH264VLevel 值，如 51 = Level 5.1；0 = 未下发）</summary>
+    public int AppliedH264Level { get; }
+
     /// <summary>编码输出事件（编码线程上触发，回调不要阻塞）</summary>
     public event Action<EncodedVideoFrame>? Encoded;
 
@@ -100,39 +103,103 @@ public sealed class MfH264Encoder : IDisposable
         _settings = settings;
         EnsureMfStartup();
 
-        var selected = SelectEncoder(hardwarePreferred);
-        IsHardware = selected.IsHardware;
-        EncoderName = selected.Name;
-        _transform = selected.Transform;
+        EncoderName = "<unknown>";
+        IsHardware = false;
+        AppliedH264Level = 0;
 
-        // 解锁异步 MFT + 声明 D3D11 感知
+        // 逐个候选尝试「激活 → 解锁异步 → 设置 D3D 管理器 → 配置媒体类型」：
+        // 编码器可能枚举得到却拒绝目标分辨率/帧率（E_INVALIDARG），此时换下一个候选而不是直接失败。
+        var failures = new List<string>();
+        var candidates = EnumCandidates(hardwarePreferred);
+        IMFTransform? chosen = null;
+        IMFDXGIDeviceManager? chosenManager = null;
         try
         {
-            var attrs = _transform.Attributes;
-            attrs?.Set(TransformAttributeKeys.TransformAsyncUnlock, 1u);
-        }
-        catch { /* 同步 MFT 无此属性，忽略 */ }
+            foreach (var candidate in candidates)
+            {
+                IMFTransform? transform = null;
+                IMFDXGIDeviceManager? manager = null;
+                try
+                {
+                    IMFTransform? activated = null;
+                    candidate.Activate.ActivateObject(out activated).CheckError();
+                    transform = activated ?? throw new InvalidOperationException($"{candidate.Name}: 激活返回空对象");
 
-        // D3D 设备管理器（零拷贝路径；DX12 编码器必须先设置才能成功配置类型）
-        if (device != null && selected.RequiresD3DManager)
+                    // 解锁异步 MFT：必须早于任何 ProcessMessage / Set*Type 调用，
+                    // 否则异步 MFT（含 AVC DX12 编码器）会以 0x80041000 拒绝。
+                    try
+                    {
+                        var attrs = transform.Attributes;
+                        attrs?.Set(TransformAttributeKeys.TransformAsyncUnlock, 1u);
+                    }
+                    catch { /* 同步 MFT 无此属性，忽略 */ }
+
+                    // D3D 设备管理器（零拷贝路径；DX12 编码器必须先设置才能成功配置类型）
+                    if (device != null && candidate.RequiresD3DManager)
+                    {
+                        try
+                        {
+                            manager = MediaFactory.MFCreateDXGIDeviceManager();
+                            manager.ResetDevice(device);
+                            transform.ProcessMessage(TMessageType.MessageSetD3DManager,
+                                (nuint)manager.NativePointer);
+                            Logging.Logger.Info("MF", $"D3D 设备管理器已设置: {candidate.Name}");
+                        }
+                        catch (Exception ex)
+                        {
+                            Logging.Logger.Warn("MF",
+                                $"{candidate.Name} D3D 设备管理器设置失败（退回系统内存路径）: {ex.Message}");
+                            manager?.Dispose();
+                            manager = null;
+                        }
+                    }
+
+                    // 配置类型（输出 → 输入）
+                    if (!TryConfigureTypes(transform, settings, out var level, out var configureError))
+                    {
+                        failures.Add($"{candidate.Name}: {configureError}");
+                        Logging.Logger.Info("MF",
+                            $"{candidate.Name} 不支持 {settings.Width}x{settings.Height}@{settings.Fps}" +
+                            $"（Level {VideoFormatPlanner.H264LevelName(level)}）: {configureError}");
+                        continue;
+                    }
+
+                    chosen = transform;
+                    chosenManager = manager;
+                    EncoderName = candidate.Name;
+                    IsHardware = candidate.IsHardware;
+                    AppliedH264Level = level;
+                    transform = null;   // 所有权转移，避免 finally 释放
+                    manager = null;
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    failures.Add($"{candidate.Name}: {ex.GetType().Name} {ex.Message.Split('\n')[0].Trim()}");
+                }
+                finally
+                {
+                    transform?.Dispose();
+                    manager?.Dispose();
+                }
+            }
+        }
+        finally
         {
-            try
-            {
-                var manager = MediaFactory.MFCreateDXGIDeviceManager();
-                manager.ResetDevice(device);
-                _transform.ProcessMessage(TMessageType.MessageSetD3DManager, (nuint)manager.NativePointer);
-                _d3dManager = manager;
-                Logging.Logger.Info("MF", $"D3D 设备管理器已设置: {selected.Name}");
-            }
-            catch (Exception ex)
-            {
-                Logging.Logger.Warn("MF", $"D3D 设备管理器设置失败: {ex.Message}");
-                _d3dManager = null;
-            }
+            foreach (var candidate in candidates) candidate.Activate.Dispose();
         }
 
-        // 配置类型（输出 → 输入）
-        ConfigureTypes();
+        if (chosen == null)
+            throw new InvalidOperationException(
+                $"未找到支持 {settings.Width}x{settings.Height}@{settings.Fps} 的 H.264 编码器: " +
+                string.Join("; ", failures));
+
+        _transform = chosen;
+        _d3dManager = chosenManager;
+        if (AppliedH264Level > 0)
+            Logging.Logger.Info("MF",
+                $"H.264 Level 已显式下发: {VideoFormatPlanner.H264LevelName(AppliedH264Level)}" +
+                $"（{settings.Width}x{settings.Height}@{settings.Fps}）");
 
         // 输出流信息：判断是否需要调用方预分配输出样本
         try
@@ -163,7 +230,7 @@ public sealed class MfH264Encoder : IDisposable
                 Priority = ThreadPriority.AboveNormal,
             };
             _pumpThread.Start();
-            Logging.Logger.Info("MF", $"异步事件泵已启动: {selected.Name}");
+            Logging.Logger.Info("MF", $"异步事件泵已启动: {EncoderName}");
         }
         catch
         {
@@ -173,76 +240,80 @@ public sealed class MfH264Encoder : IDisposable
         Logging.Logger.Info("MF",
             $"编码器就绪: {EncoderName} (硬件={IsHardware}, 零拷贝={IsD3DAccelerated}, " +
             $"模式={(IsAsyncMode ? "异步" : "同步")}, {settings.Width}x{settings.Height}@{settings.Fps}, " +
-            $"{settings.BitrateBps / 1000}kbps)");
+            $"{settings.BitrateBps / 1000}kbps, Level {VideoFormatPlanner.H264LevelName(AppliedH264Level)})");
     }
 
     // ===== 编码器选择 =====
 
-    private sealed record SelectedEncoder(IMFTransform Transform, string Name, bool IsHardware, bool RequiresD3DManager);
+    /// <summary>Win11 24H2+ 的 D3D12 视频编码器（新 GPU 上走硬件、零拷贝）</summary>
+    private const string AvcDx12EncoderName = "Microsoft AVC DX12 Encoder";
 
-    private static SelectedEncoder SelectEncoder(bool hardwarePreferred)
+    private sealed record Candidate(IMFActivate Activate, string Name, bool IsHardware, bool RequiresD3DManager);
+
+    /// <summary>
+    /// 按优先级枚举候选编码器（只枚举不激活；调用方负责 Dispose 每个 IMFActivate）：
+    ///   1) 经典硬件 MFT（NVENC / QSV / AMF 注册的 Media Foundation 硬件编码器）
+    ///   2) Microsoft AVC DX12 Encoder
+    ///   3) 系统软件同步 MFT
+    /// 名字看不出是 H.264 的（WMV / H263 / MPEG-2 / HEVC）排到最后兜底；同名只保留优先级最高的一份。
+    /// </summary>
+    private static List<Candidate> EnumCandidates(bool hardwarePreferred)
     {
-        var errors = new List<string>();
+        var result = new List<Candidate>();
+        var fallback = new List<Candidate>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        // 1) 经典硬件 MFT（NVENC/QSV/AMF 注册的 Media Foundation 硬件编码器）
         if (hardwarePreferred)
         {
-            try
-            {
-                var hw = EnumActivators(MftEnumFlagHardware | MftEnumFlagSortandfilter);
-                if (hw.Count > 0)
-                {
-                    var (t, n) = Activate(hw[0]);
-                    return new SelectedEncoder(t, n, true, true);
-                }
-            }
-            catch (Exception ex) { errors.Add($"硬件MFT: {ex.Message}"); }
-            Logging.Logger.Info("MF", "无注册的硬件编码器 MFT，尝试 AVC DX12 编码器");
+            AddCandidates(result, fallback, seen,
+                EnumActivators(MftEnumFlagHardware | MftEnumFlagSortandfilter), true, true);
+            if (result.Count == 0)
+                Logging.Logger.Info("MF", "无注册的硬件编码器 MFT，尝试 AVC DX12 编码器");
         }
 
-        // 2) Microsoft AVC DX12 编码器（Win11 24H2+，D3D12 视频 encode，新 GPU 上为硬件）
-        try
+        var dx12 = new List<IMFActivate>();
+        foreach (var act in EnumActivators(MftEnumFlagAll))
         {
-            foreach (var act in EnumActivators(MftEnumFlagAll))
-            {
-                string name;
-                try { name = act.GetString(TransformAttributeKeys.MftFriendlyNameAttribute); }
-                catch { name = ""; }
-
-                if (!name.Equals("Microsoft AVC DX12 Encoder", StringComparison.OrdinalIgnoreCase))
-                {
-                    act.Dispose();
-                    continue;
-                }
-                var (t, n) = Activate(act);
-                // 预检：类型能否配置（有些机器上 DX12 编码器枚举得到但资源分配失败）
-                return new SelectedEncoder(t, n, true, true);
-            }
+            if (SafeName(act).Equals(AvcDx12EncoderName, StringComparison.OrdinalIgnoreCase)) dx12.Add(act);
+            else act.Dispose();
         }
-        catch (Exception ex) { errors.Add($"AVC DX12: {ex.Message}"); }
+        AddCandidates(result, fallback, seen, dx12, true, true);
 
-        // 3) 系统软件编码器（同步）
-        try
-        {
-            var sw = EnumActivators(MftEnumFlagSyncmft | MftEnumFlagLocalmft | MftEnumFlagSortandfilter);
-            if (sw.Count > 0)
-            {
-                var (t, n) = Activate(sw[0]);
-                return new SelectedEncoder(t, n, false, false);
-            }
-        }
-        catch (Exception ex) { errors.Add($"软件MFT: {ex.Message}"); }
+        AddCandidates(result, fallback, seen,
+            EnumActivators(MftEnumFlagSyncmft | MftEnumFlagLocalmft | MftEnumFlagSortandfilter), false, false);
 
-        throw new InvalidOperationException("未找到可用的 H.264 编码器: " + string.Join("; ", errors));
+        result.AddRange(fallback);
+        return result;
     }
 
-    private static (IMFTransform Transform, string Name) Activate(IMFActivate activate)
+    /// <summary>把一组激活对象按「名字是否像 H.264」分流进候选表或兜底表</summary>
+    private static void AddCandidates(List<Candidate> result, List<Candidate> fallback, HashSet<string> seen,
+        List<IMFActivate> activators, bool isHardware, bool requiresD3DManager)
     {
-        var name = "<unknown>";
-        try { name = activate.GetString(TransformAttributeKeys.MftFriendlyNameAttribute); }
-        catch { }
-        activate.ActivateObject(out IMFTransform transform).CheckError();
-        return (transform, name);
+        foreach (var activate in activators)
+        {
+            var name = SafeName(activate);
+            if (!seen.Add(name))
+            {
+                activate.Dispose();
+                continue;
+            }
+            var candidate = new Candidate(activate, name, isHardware, requiresD3DManager);
+            if (LooksLikeH264(name)) result.Add(candidate);
+            else fallback.Add(candidate);
+        }
+    }
+
+    /// <summary>名字是否像 H.264/AVC 编码器（各厂商命名不统一：H264 / H.264 / AVC）</summary>
+    private static bool LooksLikeH264(string name) =>
+        name.Contains("H264", StringComparison.OrdinalIgnoreCase) ||
+        name.Contains("H.264", StringComparison.OrdinalIgnoreCase) ||
+        name.Contains("AVC", StringComparison.OrdinalIgnoreCase);
+
+    private static string SafeName(IMFActivate activate)
+    {
+        try { return activate.GetString(TransformAttributeKeys.MftFriendlyNameAttribute); }
+        catch { return "<unknown>"; }
     }
 
     /// <summary>枚举 MFT 激活对象（调用方负责 Dispose）</summary>
@@ -284,29 +355,78 @@ public sealed class MfH264Encoder : IDisposable
 
     // ===== 媒体类型与 CodecAPI =====
 
-    private void ConfigureTypes()
+    /// <summary>
+    /// 配置输出 → 输入媒体类型。
+    /// H.264 Level 必须显式下发：Microsoft AVC DX12 Encoder 默认锁在 Level 5.0，
+    /// 4K（32400 宏块/帧）或 1080p144（1175040 宏块/秒）会被直接拒绝（E_INVALIDARG）。
+    /// 依次尝试「带 level」「不带 level」，兼容不接受该属性的编码器。
+    /// Profile 不动：保持码流 profile 与 WebRTC SDP 里 profile-level-id 的既有约定。
+    /// </summary>
+    private static bool TryConfigureTypes(IMFTransform transform, EncoderSettings settings,
+        out int appliedLevel, out string error)
     {
-        var outType = MediaFactory.MFCreateMediaType();
-        outType.Set(MediaTypeAttributeKeys.MajorType, MediaTypeGuids.Video);
-        outType.Set(MediaTypeAttributeKeys.Subtype, VideoFormatGuids.H264);
-        outType.Set(MediaTypeAttributeKeys.FrameSize, Pack2(_settings.Width, _settings.Height));
-        outType.Set(MediaTypeAttributeKeys.FrameRate, Pack2(_settings.Fps, 1));
-        outType.Set(MediaTypeAttributeKeys.InterlaceMode, 2u); // Progressive
-        outType.Set(MediaTypeAttributeKeys.AvgBitrate, (uint)_settings.BitrateBps);
-        _transform.SetOutputType(0, outType, 0);
-        outType.Dispose();
+        var level = VideoFormatPlanner.SuggestH264Level(settings.Width, settings.Height, settings.Fps);
+        appliedLevel = level;
+        error = string.Empty;
 
-        var inType = MediaFactory.MFCreateMediaType();
-        inType.Set(MediaTypeAttributeKeys.MajorType, MediaTypeGuids.Video);
-        inType.Set(MediaTypeAttributeKeys.Subtype, VideoFormatGuids.NV12);
-        inType.Set(MediaTypeAttributeKeys.FrameSize, Pack2(_settings.Width, _settings.Height));
-        inType.Set(MediaTypeAttributeKeys.FrameRate, Pack2(_settings.Fps, 1));
-        inType.Set(MediaTypeAttributeKeys.InterlaceMode, 2u);
-        inType.Set(MediaTypeAttributeKeys.AllSamplesIndependent, 1u);
-        _transform.SetInputType(0, inType, 0);
-        inType.Dispose();
+        foreach (var useLevel in new[] { true, false })
+        {
+            var outType = MediaFactory.MFCreateMediaType();
+            try
+            {
+                outType.Set(MediaTypeAttributeKeys.MajorType, MediaTypeGuids.Video);
+                outType.Set(MediaTypeAttributeKeys.Subtype, VideoFormatGuids.H264);
+                outType.Set(MediaTypeAttributeKeys.FrameSize, Pack2(settings.Width, settings.Height));
+                outType.Set(MediaTypeAttributeKeys.FrameRate, Pack2(settings.Fps, 1));
+                outType.Set(MediaTypeAttributeKeys.InterlaceMode, 2u); // Progressive
+                outType.Set(MediaTypeAttributeKeys.AvgBitrate, (uint)settings.BitrateBps);
+                if (useLevel) outType.Set(MediaTypeAttributeKeys.Mpeg2Level, (uint)level);
+                transform.SetOutputType(0, outType, 0);
+            }
+            catch (SharpGenException ex)
+            {
+                error = $"SetOutputType(level={(useLevel ? VideoFormatPlanner.H264LevelName(level) : "未设置")}) " +
+                        $"0x{ex.HResult:X8}";
+                continue;
+            }
+            finally
+            {
+                outType.Dispose();
+            }
+
+            var inType = MediaFactory.MFCreateMediaType();
+            try
+            {
+                inType.Set(MediaTypeAttributeKeys.MajorType, MediaTypeGuids.Video);
+                inType.Set(MediaTypeAttributeKeys.Subtype, VideoFormatGuids.NV12);
+                inType.Set(MediaTypeAttributeKeys.FrameSize, Pack2(settings.Width, settings.Height));
+                inType.Set(MediaTypeAttributeKeys.FrameRate, Pack2(settings.Fps, 1));
+                inType.Set(MediaTypeAttributeKeys.InterlaceMode, 2u);
+                inType.Set(MediaTypeAttributeKeys.AllSamplesIndependent, 1u);
+                transform.SetInputType(0, inType, 0);
+                appliedLevel = useLevel ? level : 0;
+                return true;
+            }
+            catch (SharpGenException ex)
+            {
+                error = $"SetInputType 0x{ex.HResult:X8}";
+            }
+            finally
+            {
+                inType.Dispose();
+            }
+        }
+
+        appliedLevel = level;
+        return false;
     }
 
+    /// <summary>
+    /// 尽力而为地设置编码器属性（CBR / 码率 / 低延迟 / GOP / 场景）。
+    /// 注意：并非所有编码器都实现 ICodecAPI —— 实测 Win11 的 "Microsoft AVC DX12 Encoder"
+    /// 对下列属性一律返回 E_NOTIMPL，GOP 与强制关键帧因此走编码器默认值（实测约每 30 帧一个 IDR）。
+    /// 码率的主控是输出媒体类型上的 MF_MT_AVG_BITRATE（该属性生效），这里失败只影响调优，不影响共享。
+    /// </summary>
     private void ConfigureCodecApi()
     {
         var p = _transform.NativePointer;

@@ -26,6 +26,8 @@ public sealed class GpuVideoProcessor : IDisposable
     private ID3D11VideoProcessor? _processor;
     private ID3D11Texture2D? _nv12Output;
     private int _outWidth, _outHeight;
+    // VideoProcessor 实例当前对应的输入/输出尺寸（任一变化都必须重建，见 EnsureProcessor）
+    private int _procInWidth, _procInHeight, _procOutWidth, _procOutHeight;
 
     public GpuVideoProcessor(ID3D11Device device)
     {
@@ -119,7 +121,11 @@ public sealed class GpuVideoProcessor : IDisposable
     /// <summary>确保 VideoProcessor 实例匹配输入/输出尺寸（尺寸变化时重建）</summary>
     private void EnsureProcessor(int inW, int inH, int outW, int outH)
     {
-        if (_processor != null && _outWidth == outW && _outHeight == outH) return;
+        // 输入尺寸同样参与判定：切换共享源（如 1080p 显示器 → 4K 显示器）时
+        // 输出尺寸可能不变，但 ContentDescription 的输入尺寸必须更新，否则缩放结果错误。
+        if (_processor != null &&
+            _procInWidth == inW && _procInHeight == inH &&
+            _procOutWidth == outW && _procOutHeight == outH) return;
         _processor?.Dispose();
         _enumerator?.Dispose();
         var desc = new VideoProcessorContentDescription
@@ -136,8 +142,7 @@ public sealed class GpuVideoProcessor : IDisposable
         result = _videoDevice.CreateVideoProcessor(_enumerator, 0, out var processor);
         result.CheckError();
         _processor = processor;
-        _outWidth = outW;
-        _outHeight = outH;
+        (_procInWidth, _procInHeight, _procOutWidth, _procOutHeight) = (inW, inH, outW, outH);
         Logger.Debug("VideoProc", $"VideoProcessor 已重建: {inW}x{inH} → {outW}x{outH}");
     }
 

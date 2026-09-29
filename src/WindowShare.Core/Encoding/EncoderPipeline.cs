@@ -8,7 +8,7 @@ namespace WindowShare.Core.Encoding;
 
 /// <summary>
 /// 编码管线：CaptureFrame（GPU BGRA 纹理 / CPU BGRA 像素）→ GPU 转换 NV12 → H.264 编码 → Encoded 事件。
-/// 支持运行中调整码率与输出分辨率（动态码率/动态分辨率）。
+/// 支持运行中调整码率与输出分辨率（动态码率/动态分辨率），并按目标帧率节流。
 /// </summary>
 public sealed class EncoderPipeline : IDisposable
 {
@@ -25,6 +25,18 @@ public sealed class EncoderPipeline : IDisposable
     private int _uploadWidth, _uploadHeight;
     private long _encodedFrames;
     private long _encodedBytes;
+    private long _droppedFrames;
+    // 帧率节流：捕获源可能高于目标帧率（如 144Hz 显示器 + 30fps 档），
+    // 必须丢帧，否则码流实际帧率与声明帧率不符，Viewer 端会持续累积延迟。
+    private long _frameIntervalQpc;
+    private long _lastAcceptedQpc;
+    // 关键帧节奏按「时间」而不是「帧数」触发：真实捕获帧率可能远低于目标
+    // （静态桌面下 WGC 只在内容变化时出帧，约 8fps），按帧数计的 GOP 会被拉长到
+    // 7 秒以上，新接入的观看者要一直黑屏等到下一个 IDR。
+    private const int KeyFrameIntervalSeconds = 2;
+    private long _keyFrameIntervalQpc;
+    private long _lastKeyFrameQpc;
+    private bool _keyFrameRequestWarned;
 
     /// <summary>编码输出（编码器线程上触发）</summary>
     public event Action<EncodedVideoFrame>? Encoded;
@@ -43,12 +55,17 @@ public sealed class EncoderPipeline : IDisposable
 
     public EncoderSettings Settings { get; private set; }
 
+    /// <summary>因帧率节流被丢弃的帧数（诊断用）</summary>
+    public long DroppedFrames => Interlocked.Read(ref _droppedFrames);
+
     public EncoderPipeline(EncoderSettings settings)
     {
         Settings = settings;
         (_outWidth, _outHeight) = EvenSize(settings.Width, settings.Height);
         _dynamicMaxW = _outWidth;
         _dynamicMaxH = _outHeight;
+        _frameIntervalQpc = System.Diagnostics.Stopwatch.Frequency / Math.Max(1, settings.Fps);
+        _keyFrameIntervalQpc = System.Diagnostics.Stopwatch.Frequency * KeyFrameIntervalSeconds;
 
         _device = D3D11DevicePool.GetOrCreate();
         _videoProcessor = new GpuVideoProcessor(_device);
@@ -58,6 +75,9 @@ public sealed class EncoderPipeline : IDisposable
         {
             Interlocked.Increment(ref _encodedFrames);
             Interlocked.Add(ref _encodedBytes, f.PayloadSize);
+            // 以「实际出帧」为准刷新关键帧时刻（从请求发出到 IDR 落地之间有延迟）
+            if (f.Keyframe)
+                Interlocked.Exchange(ref _lastKeyFrameQpc, System.Diagnostics.Stopwatch.GetTimestamp());
             Encoded?.Invoke(f);
         };
         Logger.Info("Pipeline",
@@ -74,8 +94,24 @@ public sealed class EncoderPipeline : IDisposable
         {
             try
             {
-                // 目标尺寸 = min(动态上限, 源尺寸)，并取偶（NV12 要求）
-                var (tw, th) = EvenSize(Math.Min(_dynamicMaxW, frame.Width), Math.Min(_dynamicMaxH, frame.Height));
+                // 帧率节流：早于目标帧间隔到达的帧直接丢弃（finally 仍会释放帧）
+                var nowQpc = System.Diagnostics.Stopwatch.GetTimestamp();
+                if (_lastAcceptedQpc != 0 &&
+                    nowQpc - _lastAcceptedQpc < _frameIntervalQpc - _frameIntervalQpc / 8)
+                {
+                    Interlocked.Increment(ref _droppedFrames);
+                    return;
+                }
+                _lastAcceptedQpc = nowQpc;
+
+                // 关键帧兜底：距上一个 IDR 超过间隔就强制一个（首帧、低实际帧率、新观看者接入）
+                if (nowQpc - Interlocked.Read(ref _lastKeyFrameQpc) >= _keyFrameIntervalQpc)
+                    RequestKeyframe();
+
+                // 目标尺寸 = 源尺寸等比缩放进 (动态上限) 盒子内，取偶（NV12 要求）。
+                // 必须等比：源宽高比可能与编码设置不同（如 16:10 显示器、任意比例窗口），
+                // 独立夹取宽高会把画面压扁。
+                var (tw, th) = VideoFormatPlanner.FitInto(frame.Width, frame.Height, _dynamicMaxW, _dynamicMaxH);
                 if (tw != _outWidth || th != _outHeight)
                     UpdateOutputSize(tw, th);
 
@@ -115,8 +151,19 @@ public sealed class EncoderPipeline : IDisposable
         return ok;
     }
 
-    /// <summary>请求关键帧（Viewer 重连/接入时）</summary>
-    public void RequestKeyframe() => _encoder.ForceKeyFrame();
+    /// <summary>请求关键帧（Viewer 接入/重连，或超过关键帧间隔时由管线自动触发）</summary>
+    public bool RequestKeyframe()
+    {
+        var ok = _encoder.ForceKeyFrame();
+        if (!ok && !_keyFrameRequestWarned)
+        {
+            _keyFrameRequestWarned = true;
+            Logger.Warn("Pipeline",
+                $"编码器不认 CODECAPI_AVEncVideoForceKeyFrame（{EncoderName}）：" +
+                "关键帧只按 GOP 周期出现，新接入的观看者可能要多等一会儿");
+        }
+        return ok;
+    }
 
     /// <summary>
     /// 动态分辨率：更新编码输出尺寸上限（等比缩放由 VideoProcessor 完成）。

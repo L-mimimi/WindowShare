@@ -60,3 +60,27 @@ public interface ICaptureEngine : IDisposable
     /// <summary>停止捕获</summary>
     void Stop();
 }
+
+/// <summary>
+/// 可选能力：引擎自带帧率节流（轮询式引擎实现，如 GDI 兜底引擎）。
+/// 会话启动前把目标帧率下发给引擎；不实现此接口的引擎（WGC / DXGI 按系统更新事件推送）
+/// 由编码管线统一节流，见 EncoderPipeline。
+/// </summary>
+public interface IFrameRateLimited
+{
+    /// <summary>目标捕获帧率（1..240）</summary>
+    int TargetFps { get; set; }
+}
+
+/// <summary>
+/// 捕获引擎偏好。默认自动降级（WGC → DXGI → GDI）；指定 <see cref="Gdi"/> 时使用定速轮询引擎，
+/// 出帧节奏与屏幕内容是否变化无关 —— 自动化测试与 WGC 异常环境用它可获得稳定帧率。
+/// </summary>
+public enum CaptureEnginePreference
+{
+    /// <summary>自动：按可用性降级 WGC → DXGI（仅整屏）→ GDI</summary>
+    Auto = 0,
+
+    /// <summary>强制 GDI（BitBlt / PrintWindow），定速轮询</summary>
+    Gdi = 1,
+}

@@ -8,8 +8,13 @@ namespace WindowShare.Core.Capture;
 public static class CaptureEngineFactory
 {
     /// <summary>创建引擎，返回引擎与说明（说明用于 UI 提示回退原因）</summary>
-    public static (ICaptureEngine Engine, string Note) Create(CaptureSource source)
+    public static (ICaptureEngine Engine, string Note) Create(CaptureSource source,
+        CaptureEnginePreference preference = CaptureEnginePreference.Auto)
     {
+        // 显式指定 GDI：跳过自动降级（测试与兼容性排查用）
+        if (preference == CaptureEnginePreference.Gdi)
+            return (new GdiCaptureEngine(), "按指定使用 GDI 捕获（定速轮询，兼容模式）");
+
         if (GraphicsCaptureEngine.IsAvailable())
             return (new GraphicsCaptureEngine(), string.Empty);
 

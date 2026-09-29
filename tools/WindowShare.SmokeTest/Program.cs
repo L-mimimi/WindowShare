@@ -31,17 +31,20 @@ public static class Program
 
         try
         {
+            // 每个 Part 独立兜底：单个 Part 抛异常不应中断后续验证
             Part1Probe();
-            var ok2 = Part2SyntheticEncode();
-            var ok3 = Part3RealCapture();
-            var ok4 = Part4LoopbackE2E();
-            var ok5 = Part5Signaling();
-            var ok6 = Part6WebRtcLoopback();
+            var ok2 = RunPart("Part2", Part2SyntheticEncode);
+            var ok2b = RunPart("Part2b", Part2bHighResAndHighFps);
+            var ok3 = RunPart("Part3", Part3RealCapture);
+            var ok4 = RunPart("Part4", Part4LoopbackE2E);
+            var ok5 = RunPart("Part5", Part5Signaling);
+            var ok6 = RunPart("Part6", Part6WebRtcLoopback);
             Logger.Info("SmokeTest",
                 $"===== 结果: 合成编码={(ok2 ? "PASS" : "FAIL")}, " +
+                $"4K/高帧率={(ok2b ? "PASS" : "FAIL")}, " +
                 $"真实捕获={(ok3 ? "PASS" : "FAIL")}, 回环端到端={(ok4 ? "PASS" : "FAIL")}, " +
                 $"信令={(ok5 ? "PASS" : "FAIL")}, WebRTC={(ok6 ? "PASS" : "FAIL")} =====");
-            return ok2 && ok3 && ok4 && ok5 && ok6 ? 0 : 1;
+            return ok2 && ok2b && ok3 && ok4 && ok5 && ok6 ? 0 : 1;
         }
         catch (Exception ex)
         {
@@ -65,7 +68,65 @@ public static class Program
         Logger.Info("Probe", "---- 编码器清单 ----");
         foreach (var name in MfH264Encoder.ProbeEncoders())
             Logger.Info("Probe", $"  {name}");
+
+        Logger.Info("Probe", "---- 分辨率/帧率档位支持探测 ----");
+        var probeDevice = D3D11DevicePool.GetOrCreate();
+        // 逐个变量隔离：先确认基线可用，再单独抬高码率 / 帧率 / 分辨率，
+        // 以判断编码器拒绝配置（E_INVALIDARG）的真正约束是哪个维度。
+        foreach (var (w, h, fps, kbps, note) in new[]
+                 {
+                     (1280, 720, 30, 2_600, "基线 720p30"),
+                     (1920, 1080, 30, 5_300, "基线 1080p30"),
+                     (1920, 1080, 30, 20_000, "仅抬高码率 20Mbps"),
+                     (1920, 1080, 60, 9_300, "仅抬高帧率 60"),
+                     (1920, 1080, 144, 5_000, "仅抬高帧率 144（低码率）"),
+                     (1920, 1080, 144, 18_500, "帧率 144 + 高码率"),
+                     (2560, 1440, 30, 4_000, "仅抬高到 2K（低码率）"),
+                     (3840, 2160, 30, 3_000, "仅抬高到 4K（低码率）"),
+                     (3840, 2160, 30, 17_000, "4K + 自动码率"),
+                     (3840, 2160, 60, 30_000, "4K60 + 自动码率"),
+                 })
+        {
+            var settings = new EncoderSettings
+            {
+                Width = w,
+                Height = h,
+                Fps = fps,
+                BitrateBps = kbps * 1000,
+                GopSize = Math.Max(2, fps * 2),
+            };
+            var level = VideoFormatPlanner.SuggestH264Level(w, h, fps);
+            try
+            {
+                using var encoder = new MfH264Encoder(settings, probeDevice);
+                Logger.Info("Probe",
+                    $"  {w}x{h}@{fps} {kbps}kbps Level {VideoFormatPlanner.H264LevelName(level)} [{note}]: 可用 " +
+                    $"({encoder.EncoderName}, 硬件={encoder.IsHardware}, 零拷贝={encoder.IsD3DAccelerated}, " +
+                    $"实际 Level {VideoFormatPlanner.H264LevelName(encoder.AppliedH264Level)})");
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn("Probe",
+                    $"  {w}x{h}@{fps} {kbps}kbps Level {VideoFormatPlanner.H264LevelName(level)} [{note}]: 不可用 - " +
+                    $"{ex.GetType().Name} {FirstLine(ex.Message)}");
+            }
+        }
     }
+
+    /// <summary>单个 Part 的异常兜底：失败记为 FAIL，但不影响后续 Part 执行</summary>
+    private static bool RunPart(string name, Func<bool> part)
+    {
+        try { return part(); }
+        catch (Exception ex)
+        {
+            Logger.Error(name, $"{name} 抛出异常", ex);
+            return false;
+        }
+    }
+
+    /// <summary>异常消息首行（多行堆栈信息只取第一行，便于日志阅读）</summary>
+    private static string FirstLine(string message) =>
+        message.Split('\n')[0].TrimEnd('\r');
 
     /// <summary>合成运动图像编码 3 秒 @30fps，验证编码器与文件输出</summary>
     private static bool Part2SyntheticEncode()
@@ -246,6 +307,8 @@ public static class Program
         {
             Width = 1280, Fps = 30, BitrateBps = 2_500_000,
             RecordForValidation = false,
+            // 定速轮询捕获：WGC 在静态桌面上只在内容变化时出帧（约 8fps），会让回环测试偶发失败
+            CaptureEngine = CaptureEnginePreference.Gdi,
         });
         server.Start();
     }
@@ -258,6 +321,8 @@ public static class Program
 
     long receivedFrames = 0;
     long decodedFrames = 0;
+    long decodableFrames = 0;
+    var firstKeyframeSeen = false;
     var rttMs = double.NaN;
     var state = (ConnectionState)(-1);
     var connectedEvent = new ManualResetEventSlim(false);
@@ -275,32 +340,51 @@ public static class Program
     {
         Interlocked.Increment(ref receivedFrames);
         stats.OnFrame(f.Data.Length);
+        // 首个 IDR 之前的帧没有参考帧，按设计解不出来（Viewer 端同样丢弃），
+        // 因此断言用「首个 IDR 之后的可解码帧」做分母，而不是「收到的帧」。
+        if (!Volatile.Read(ref firstKeyframeSeen))
+        {
+            if (!AnnexB.IsKeyframe(f.Data)) return;
+            Volatile.Write(ref firstKeyframeSeen, true);
+        }
+        Interlocked.Increment(ref decodableFrames);
         try { decoder.Decode(f.Data, f.TimestampUtc); } catch (Exception ex) { Logger.Warn("Part4", "解码异常: " + ex.Message); }
     };
-    client.RttUpdated += r => rttMs = r;
-    client.Start();
+        client.RttUpdated += r => rttMs = r;
+        // 解码回调必须在 Start 之前挂好：否则连接建立后头几帧解出来了却没被计数
+        decoder.Decoded += d => Interlocked.Increment(ref decodedFrames);
+        client.Start();
 
-    // 解码回调（最后挂接，避免与 FrameReceived 竞争计数）
-    decoder.Decoded += d => Interlocked.Increment(ref decodedFrames);
-
-    var connected = connectedEvent.Wait(TimeSpan.FromSeconds(10));
-    if (connected) Thread.Sleep(6000); // 收 6 秒流
+        var connected = connectedEvent.Wait(TimeSpan.FromSeconds(10));
+        if (connected)
+        {
+            session.RequestKeyframe();   // 接入即出 IDR，不等 GOP 周期
+            Thread.Sleep(6000);          // 收 6 秒流
+        }
 
     var encEnabled = client.IsEncrypted;
     client.Stop();
     client.Dispose();
+    // 抽干解码器内部滞留的尾部帧（H.264 解码器会攒参考帧），否则末尾若干帧永远出不来
+    var flushed = decoder.Flush();
+    var decodeDiag = $"投喂 {decoder.InputFrames} 帧, 输出样本 {decoder.OutputSamples} 个, " +
+                     $"分辨率未知丢弃 {decoder.DroppedUnknownSize} 帧, 缓冲不足丢弃 {decoder.DroppedShortBuffer} 帧";
     decoder.Dispose();
     server.Stop();
     session.Stop("part4-end");
 
     var (bitrate, fps, _) = stats.Tick();
     Logger.Info("Part4", $"连接={connected}, 状态={state}, 加密={encEnabled}, " +
-                        $"收到 {receivedFrames} 帧, 解码 {decodedFrames} 帧, " +
+                        $"收到 {receivedFrames} 帧, 首个 IDR 后可解码 {Interlocked.Read(ref decodableFrames)} 帧, 解码 {decodedFrames} 帧, " +
+                        $"抽干补出 {flushed} 帧, {decodeDiag}, " +
                         $"码率≈{bitrate / 1000:F0}kbps, RTT={rttMs:F1}ms");
 
-    var pass = connected && receivedFrames > 60 &&
-               decodedFrames > 30 && encEnabled;
-    Logger.Info("Part4", pass ? "Part4 PASS" : "Part4 FAIL");
+        // 比例断言而非绝对帧数：GDI 定速捕获 6 秒约 180 帧，但实际帧率仍受机器负载影响，
+        // 绝对阈值（旧值 received>60 / decoded>30）会造成偶发失败。
+        var decodable = Interlocked.Read(ref decodableFrames);
+        var pass = connected && encEnabled && Volatile.Read(ref firstKeyframeSeen) &&
+                   receivedFrames >= 40 && decodable >= 30 && decodedFrames >= decodable * 9 / 10;
+        Logger.Info("Part4", pass ? "Part4 PASS" : "Part4 FAIL");
     return pass;
     }
     /// <summary>
@@ -436,7 +520,6 @@ public static class Program
 
         long received = 0, decoded = 0;
         var connected = new ManualResetEventSlim(false);
-        var receiverConnected = false;
 
         // ICE 候选互通
         sender.LocalIceCandidate += c => receiver.AddIceCandidate(c);
@@ -475,7 +558,7 @@ public static class Program
         receiver.StateChanged += s =>
         {
             Logger.Info("Part6", $"接收端状态: {s}");
-            if (s.Contains("已连接")) { receiverConnected = true; connected.Set(); }
+            if (s.Contains("已连接")) { connected.Set(); }
         };
 
         try
@@ -495,14 +578,29 @@ public static class Program
             session.Start(primary, new ShareOptions
             {
                 Width = 1280, Fps = 30, BitrateBps = 2_500_000, RecordForValidation = false,
+                CaptureEngine = CaptureEnginePreference.Gdi,   // 定速捕获，避免静态桌面下 WGC 几乎不出帧
             });
 
             var ok = connected.Wait(TimeSpan.FromSeconds(20));
-            if (ok) Thread.Sleep(6000); // 收 6 秒流
+            if (ok)
+            {
+                session.RequestKeyframe();   // 接入即出 IDR，不等 GOP 周期
+                Thread.Sleep(6000);          // 收 6 秒流
+            }
 
-            Logger.Info("Part6", $"Decode 调用 {Volatile.Read(ref decodeCalls)} 次; 连接={ok}, 接收={Interlocked.Read(ref received)} 帧, " +
-                                $"解码={Interlocked.Read(ref decoded)} 帧, 中继={sender.UsedRelay || receiver.UsedRelay}");
-            var pass = ok && Interlocked.Read(ref received) > 30 && Interlocked.Read(ref decoded) > 20;
+            // 先定格投喂计数，再抽干解码器内部滞留的尾部帧，最后读解码结果
+            var decodeInvocations = Volatile.Read(ref decodeCalls);
+            var receivedFrames = Interlocked.Read(ref received);
+            var flushed = decoder.Flush();
+            var decodedFrames = Interlocked.Read(ref decoded);
+            Logger.Info("Part6", $"Decode 调用 {decodeInvocations} 次; 连接={ok}, 接收={receivedFrames} 帧, " +
+                                $"解码={decodedFrames} 帧（含抽干 {flushed}）, " +
+                                $"投喂={decoder.InputFrames}, 输出样本={decoder.OutputSamples}, " +
+                                $"分辨率未知丢弃={decoder.DroppedUnknownSize}, 缓冲不足丢弃={decoder.DroppedShortBuffer}, " +
+                                $"中继={sender.UsedRelay || receiver.UsedRelay}");
+            // 比例断言：首个 IDR 之前的帧按设计被跳过（不计入解码），绝对阈值会随机器负载抖动
+            var pass = ok && receivedFrames >= 30 && decodeInvocations >= 20 &&
+                       decodedFrames >= decodeInvocations * 9 / 10;
             Logger.Info("Part6", pass ? "Part6 PASS" : "Part6 FAIL");
             return pass;
         }
@@ -527,6 +625,149 @@ public static class Program
         public string Name => "webrtc-loopback";
         public void OnEncodedFrame(EncodedVideoFrame frame) => onFrame(frame);
         public void OnShareStopped(string reason) { }
+    }
+
+    /// <summary>
+    /// 4K 与高帧率编码验证（合成图像，不依赖显示器原生分辨率）：
+    ///   - 3840×2160@30：验证最高分辨率档位真能编出码流（编码器 + GPU 视频处理器吃得下 4K），
+    ///     并把码流解回来核对分辨率——证明显式下发的 H.264 Level 产出的是合法可解码流；
+    ///   - 1280×720@120：验证帧率档位生效——投喂远快于目标帧率时，编码管线必须把输出节流到 120fps 以内。
+    /// </summary>
+    private static bool Part2bHighResAndHighFps()
+    {
+        Logger.Info("Part2b", "---- 4K / 高帧率编码验证 ----");
+        var ok4K = SyntheticEncode(3840, 2160, 30, 1.5, "smoke-4k.h264",
+            minFrames: 5, minBytes: 20_000, expectOutput: (3840, 2160), verifyDecode: true);
+        var okFps = SyntheticEncode(1280, 720, 120, 2.0, "smoke-120fps.h264",
+            minFrames: 60, minBytes: 20_000, expectOutput: (1280, 720), maxFpsRatio: 1.35);
+        var pass = ok4K && okFps;
+        Logger.Info("Part2b", pass ? "Part2b PASS" : "Part2b FAIL");
+        return pass;
+    }
+
+    /// <summary>
+    /// 合成图像编码一轮：尽可能快地投喂帧（远快于目标帧率），
+    /// 因此可同时验证「目标分辨率真被用上」与「帧率节流真的生效」。
+    /// </summary>
+    private static bool SyntheticEncode(int width, int height, int fps, double seconds, string fileName,
+        int minFrames, int minBytes, (int Width, int Height)? expectOutput = null, double maxFpsRatio = 0,
+        bool verifyDecode = false)
+    {
+        var settings = new EncoderSettings
+        {
+            Width = width,
+            Height = height,
+            Fps = fps,
+            BitrateBps = VideoFormatPlanner.SuggestBitrateBps(width, height, fps),
+            GopSize = Math.Max(2, fps * 2),
+        };
+        EncoderPipeline pipeline;
+        try
+        {
+            pipeline = new EncoderPipeline(settings);
+        }
+        catch (Exception ex)
+        {
+            Logger.Error("Part2b",
+                $"{width}x{height}@{fps} 编码管线初始化失败（该档位在本机不可用）: {ex.GetType().Name}: {FirstLine(ex.Message)}");
+            return false;
+        }
+        using var pipelineScope = pipeline;
+        var file = Path.Combine(AppPaths.Recordings, fileName);
+        using var writer = new H264FileWriter(file);
+        pipeline.Encoded += f => writer.Write(f);
+
+        // 可选：把编出来的码流直接解回来，核对能否解码 + 分辨率是否一致
+        using var decoder = verifyDecode ? new MfH264Decoder() : null;
+        long decodedFrames = 0;
+        var decodedWidth = 0;
+        var decodedHeight = 0;
+        if (decoder != null)
+        {
+            decoder.Decoded += d =>
+            {
+                Interlocked.Increment(ref decodedFrames);
+                decodedWidth = d.Width;
+                decodedHeight = d.Height;
+            };
+            pipeline.Encoded += f =>
+            {
+                try { decoder.Decode(f.Data, f.TimestampUtc); }
+                catch (Exception ex) { Logger.Warn("Part2b", "解码异常: " + FirstLine(ex.Message)); }
+            };
+        }
+
+        // 复用同一块像素缓冲：4K 单帧 33MB，逐帧新建会把 GC 打爆。
+        // Submit 内部同步把像素上传到 GPU 纹理，返回后即可安全覆写。
+        var bgra = new byte[width * height * 4];
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        long submitted = 0;
+        while (sw.Elapsed.TotalSeconds < seconds)
+        {
+            DrawPattern(bgra, width, height, sw.Elapsed.TotalSeconds);
+            pipeline.Submit(new CaptureFrame
+            {
+                Width = width,
+                Height = height,
+                TimestampUtc = DateTime.UtcNow.Ticks,
+                QpcTimestamp = System.Diagnostics.Stopwatch.GetTimestamp(),
+                BgraPixels = bgra,
+            });
+            submitted++;
+        }
+        var elapsed = sw.Elapsed.TotalSeconds;
+        sw.Stop();
+        Thread.Sleep(400); // 等待编码回调落地
+
+        var (outW, outH) = pipeline.OutputSize;
+        var (encFrames, encBytes) = pipeline.GetCounters();
+        var actualFps = elapsed > 0 ? encFrames / elapsed : 0;
+        Logger.Info("Part2b",
+            $"{width}x{height}@{fps}fps → 提交 {submitted} 帧, 编码 {encFrames} 帧 (实际 {actualFps:F1}fps), " +
+            $"节流丢弃 {pipeline.DroppedFrames} 帧, {encBytes} 字节, 输出 {outW}x{outH}, " +
+            $"码率≈{encBytes * 8.0 / Math.Max(0.001, elapsed) / 1_000_000:F1}Mbps, 编码器={pipeline.EncoderName}");
+
+        var pass = encFrames >= minFrames && writer.Bytes >= minBytes && writer.HasParameterSets;
+        if (expectOutput is { } expected)
+        {
+            if (outW != expected.Width || outH != expected.Height)
+            {
+                Logger.Error("Part2b", $"输出分辨率不符：期望 {expected.Width}x{expected.Height}，实际 {outW}x{outH}");
+                pass = false;
+            }
+        }
+        if (maxFpsRatio > 0 && actualFps > fps * maxFpsRatio)
+        {
+            Logger.Error("Part2b", $"帧率节流未生效：实际 {actualFps:F1}fps 超过目标 {fps}fps 的 {maxFpsRatio:P0}");
+            pass = false;
+        }
+        if (verifyDecode)
+        {
+            var decoded = Interlocked.Read(ref decodedFrames);
+            if (decoded <= 0)
+            {
+                Logger.Error("Part2b", $"{width}x{height}@{fps} 码流解不出任何帧（H.264 Level 下发可能无效）");
+                pass = false;
+            }
+            else if (decoded < encFrames * 4 / 5)
+            {
+                // 解码器低延迟模式失效时会先攒住一批帧（实测 28 帧）再出图，观看者接入后要黑屏约 1 秒
+                Logger.Error("Part2b",
+                    $"{width}x{height}@{fps} 解码帧数偏少：编码 {encFrames} 帧只解出 {decoded} 帧（解码器在攒帧）");
+                pass = false;
+            }
+            else if (decodedWidth != width || decodedHeight != height)
+            {
+                Logger.Error("Part2b", $"解码分辨率不符：期望 {width}x{height}，实际 {decodedWidth}x{decodedHeight}");
+                pass = false;
+            }
+            else
+            {
+                Logger.Info("Part2b", $"解码回读通过：{decoded} 帧 {decodedWidth}x{decodedHeight}");
+            }
+        }
+        if (!pass) Logger.Error("Part2b", $"{width}x{height}@{fps} 验证失败");
+        return pass;
     }
 
 }

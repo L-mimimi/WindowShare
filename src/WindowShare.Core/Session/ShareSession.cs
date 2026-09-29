@@ -25,6 +25,8 @@ public sealed record ShareOptions
     public bool RecordForValidation { get; init; }
     /// <summary>录制输出路径（RecordForValidation=true 时有效）</summary>
     public string? RecordFilePath { get; init; }
+    /// <summary>捕获引擎偏好（默认自动降级；指定 GDI 可获得与屏幕内容无关的稳定帧率）</summary>
+    public CaptureEnginePreference CaptureEngine { get; init; } = CaptureEnginePreference.Auto;
 }
 
 /// <summary>
@@ -78,6 +80,9 @@ public sealed class ShareSession : IDisposable
     /// <summary>是否零拷贝</summary>
     public bool IsZeroCopy => _pipeline?.IsZeroCopy ?? false;
 
+    /// <summary>当前编码输出尺寸（未共享时为 0×0）</summary>
+    public (int Width, int Height) OutputSize => _pipeline?.OutputSize ?? (0, 0);
+
     /// <summary>已接入的接收端列表（快照）</summary>
     public IReadOnlyList<string> SinkNames
     {
@@ -123,17 +128,30 @@ public sealed class ShareSession : IDisposable
             RoomCode = PasswordGenerator.GenerateRoomCode();
             Password = PasswordGenerator.GeneratePassword();
 
-            var (engine, note) = CaptureEngineFactory.Create(source);
+            var (engine, note) = CaptureEngineFactory.Create(source, options.CaptureEngine);
             if (!string.IsNullOrEmpty(note))
                 Logger.Warn("Session", note);
+            // 轮询式引擎（GDI）自身按目标帧率节流；推送式引擎（WGC/DXGI）由编码管线统一节流
+            if (engine is IFrameRateLimited rateLimited)
+                rateLimited.TargetFps = options.Fps;
+
+            var fps = Math.Clamp(options.Fps, 1, 240);
+            // 等比缩放到目标宽度：保持源宽高比，源比目标小时不上采样。
+            // 最高支持 4K（3840×2160）；实际输出同时受源尺寸与拥塞控制的动态分辨率上限约束。
+            var (encWidth, encHeight) = VideoFormatPlanner.FitToWidth(
+                source.Bounds.Width, source.Bounds.Height, options.Width);
+            if (encWidth < Math.Min(options.Width, VideoFormatPlanner.MaxPresetWidth))
+                Logger.Info("Session",
+                    $"源 {source.Bounds.Width}x{source.Bounds.Height} 小于目标宽度 {options.Width}，" +
+                    $"按源尺寸输出 {encWidth}x{encHeight}（不做上采样）");
 
             var pipeline = new EncoderPipeline(new EncoderSettings
             {
-                Width = Math.Max(320, Math.Min(options.Width, source.Bounds.Width & ~1)),
-                Height = Math.Max(240, Math.Min(options.Width * 9 / 16, source.Bounds.Height & ~1)),
-                Fps = options.Fps,
+                Width = encWidth,
+                Height = encHeight,
+                Fps = fps,
                 BitrateBps = options.BitrateBps,
-                GopSize = Math.Max(2, options.Fps * 2), // 2 秒一个关键帧
+                GopSize = Math.Max(2, fps * 2), // 2 秒一个关键帧
             });
 
             var recordFile = options.RecordForValidation ? options.RecordFilePath : null;
@@ -161,7 +179,24 @@ public sealed class ShareSession : IDisposable
             _startTicks = DateTime.UtcNow.Ticks;
             engine.Start(source);
             IsSharing = true;
-            Logger.Info("Session", $"共享已开始: 房间号={RoomCode}, 编码器={EncoderName}, 硬件={IsHardwareEncoder}, 零拷贝={IsZeroCopy}");
+            Logger.Info("Session",
+                $"共享已开始: 房间号={RoomCode}, {encWidth}x{encHeight}@{fps}fps {options.BitrateBps / 1000}kbps, " +
+                $"编码器={EncoderName}, 硬件={IsHardwareEncoder}, 零拷贝={IsZeroCopy}");
+        }
+    }
+
+    /// <summary>
+    /// 轮换会话凭据（房间号 + 临时密码），共享不中断：
+    /// 用于信令服务器报告「房间号被占用」时换新号重新注册，已接入的观看者不受影响。
+    /// </summary>
+    public (string RoomCode, string Password) RotateCredentials()
+    {
+        lock (_gate)
+        {
+            RoomCode = PasswordGenerator.GenerateRoomCode();
+            Password = PasswordGenerator.GeneratePassword();
+            Logger.Info("Session", $"会话凭据已轮换: 房间号={RoomCode}");
+            return (RoomCode, Password);
         }
     }
 

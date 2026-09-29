@@ -9,7 +9,7 @@ namespace WindowShare.Core.Capture;
 ///   - 窗口：PrintWindow(PW_RENDERFULLCONTENT)（支持硬件加速窗口），失败退 BitBlt；
 ///   - CPU 帧率限制 30fps；BGRA 自上而下像素。
 /// </summary>
-public sealed class GdiCaptureEngine : ICaptureEngine
+public sealed class GdiCaptureEngine : ICaptureEngine, IFrameRateLimited
 {
     public string Name => "GDI (BitBlt/PrintWindow)";
     public bool IsGpuTexture => false;
@@ -30,7 +30,14 @@ public sealed class GdiCaptureEngine : ICaptureEngine
     private Thread? _thread;
     private readonly ManualResetEventSlim _stopEvent = new(false);
     private CaptureSource _source = null!;
-    private int _targetFps = 30;
+    private volatile int _targetFps = 30;
+
+    /// <summary>目标捕获帧率（轮询节流；由会话在 Start 前下发）</summary>
+    public int TargetFps
+    {
+        get => _targetFps;
+        set => _targetFps = Math.Clamp(value, 1, 240);
+    }
 
     public static bool IsAvailable() => true;
 
@@ -56,10 +63,11 @@ public sealed class GdiCaptureEngine : ICaptureEngine
 
     private void CaptureLoop()
     {
-        var interval = TimeSpan.FromMilliseconds(1000.0 / _targetFps);
         while (!_stopEvent.IsSet)
         {
             var sw = System.Diagnostics.Stopwatch.StartNew();
+            // 每轮重读目标帧率：允许运行中调整（与编码管线节流保持一致）
+            var interval = TimeSpan.FromMilliseconds(1000.0 / Math.Max(1, _targetFps));
             try
             {
                 CaptureOnce();

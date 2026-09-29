@@ -19,35 +19,49 @@
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
-                <Grid Grid.Row="0">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="Auto"/>
-                        <ColumnDefinition Width="*"/>
-                        <ColumnDefinition Width="Auto"/>
-                        <ColumnDefinition Width="Auto"/>
-                        <ColumnDefinition Width="Auto"/>
-                    </Grid.ColumnDefinitions>
-                    <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
-                        <TextBlock Text="共享源：" VerticalAlignment="Center"/>
-                        <ComboBox x:Name="CboSources" Width="380" Margin="4"/>
-                        <Button x:Name="BtnRefresh" Content="刷新" Click="BtnRefresh_Click"/>
-                    </StackPanel>
-                    <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
-                        <TextBlock Text="画质：" VerticalAlignment="Center"/>
-                        <ComboBox x:Name="CboQuality" Width="150" Margin="4" SelectionChanged="CboQuality_SelectionChanged"/>
-                    </StackPanel>
-                    <CheckBox Grid.Column="3" x:Name="ChkRecord" Content="编码验证(写H.264)" VerticalAlignment="Center" Margin="8,0"/>
-                    <Button Grid.Column="4" x:Name="BtnToggleShare" Width="120" Margin="8,0"
+
+                <!-- 第 1 行：共享源 + 开始/停止 -->
+                <DockPanel Grid.Row="0" LastChildFill="False">
+                    <TextBlock DockPanel.Dock="Left" Text="共享源：" VerticalAlignment="Center"/>
+                    <ComboBox DockPanel.Dock="Left" x:Name="CboSources" Width="340" Margin="4"
+                              SelectionChanged="Source_SelectionChanged"/>
+                    <Button DockPanel.Dock="Left" x:Name="BtnRefresh" Content="刷新" Click="BtnRefresh_Click"/>
+                    <Button DockPanel.Dock="Right" x:Name="BtnToggleShare" Width="120" Margin="8,0"
                             Background="#1E88E5" Foreground="White" FontWeight="Bold"
                             Content="开始共享" Click="BtnToggleShare_Click"/>
-                </Grid>
-                <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,4,0,0">
-                    <CheckBox x:Name="ChkSignaling" Content="信令服务器（房间号模式）" VerticalAlignment="Center" IsChecked="False"/>
-                    <TextBlock Text="地址：" VerticalAlignment="Center" Margin="12,0,0,0"/>
-                    <TextBox x:Name="TxtSignalingUrl" Width="220" Text="http://localhost:5000" Margin="4"/>
-                    <TextBlock x:Name="TxtSignalingState" Text="未启用" Foreground="#888" VerticalAlignment="Center" Margin="8,0,0,0"/>
-                </StackPanel>
+                    <CheckBox DockPanel.Dock="Right" x:Name="ChkRecord" Content="编码验证(写H.264)"
+                              VerticalAlignment="Center" Margin="8,0"/>
+                </DockPanel>
+
+                <!-- 第 2 行：分辨率（最高 4K）+ 帧率档位 + 自动码率 -->
+                <DockPanel Grid.Row="1" LastChildFill="False" Margin="0,6,0,0">
+                    <TextBlock DockPanel.Dock="Left" Text="分辨率：" VerticalAlignment="Center"/>
+                    <ComboBox DockPanel.Dock="Left" x:Name="CboResolution" Width="180" Margin="4"
+                              SelectionChanged="Quality_SelectionChanged"/>
+                    <TextBlock DockPanel.Dock="Left" Text="帧率：" VerticalAlignment="Center" Margin="12,0,0,0"/>
+                    <ComboBox DockPanel.Dock="Left" x:Name="CboFps" Width="90" Margin="4"
+                              SelectionChanged="Quality_SelectionChanged"/>
+                    <TextBlock DockPanel.Dock="Left" x:Name="TxtBitrateHint" VerticalAlignment="Center"
+                               Margin="12,0,0,0" Foreground="#666"/>
+                </DockPanel>
+
+                <!-- 第 3 行：信令服务器（房间号模式）；失败不影响局域网共享 -->
+                <DockPanel Grid.Row="2" LastChildFill="False" Margin="0,6,0,0">
+                    <CheckBox DockPanel.Dock="Left" x:Name="ChkSignaling" Content="信令服务器（房间号模式）"
+                              VerticalAlignment="Center" IsChecked="False"
+                              Checked="ChkSignaling_Changed" Unchecked="ChkSignaling_Changed"/>
+                    <TextBlock DockPanel.Dock="Left" Text="地址：" VerticalAlignment="Center" Margin="12,0,0,0"/>
+                    <TextBox DockPanel.Dock="Left" x:Name="TxtSignalingUrl" Width="220" Margin="4"
+                             Text="http://localhost:5000" ToolTip="形如 http://主机:5000；跨网段观看才需要"/>
+                    <Button DockPanel.Dock="Left" x:Name="BtnSignalingRetry" Content="重试" Padding="10,2"
+                            Margin="4,0" Click="BtnSignalingRetry_Click" Visibility="Collapsed"
+                            ToolTip="重新连接信令服务器并注册房间（不影响正在进行的局域网共享）"/>
+                    <TextBlock DockPanel.Dock="Left" x:Name="TxtSignalingState" Text="未启用" Foreground="#888"
+                               VerticalAlignment="Center" Margin="8,0,0,0" MaxWidth="380"
+                               TextTrimming="CharacterEllipsis"/>
+                </DockPanel>
             </Grid>
         </GroupBox>
 
@@ -79,6 +93,8 @@
                 </StackPanel>
                 <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" Margin="20,0,0,0">
                     <TextBlock x:Name="TxtEncoder" Text="编码器：未启动" VerticalAlignment="Center"/>
+                    <TextBlock x:Name="TxtOutput" Text="" VerticalAlignment="Center" Margin="12,0,0,0"
+                               Foreground="#666" ToolTip="实际编码输出（受源尺寸与动态分辨率约束，可能低于所选档位）"/>
                 </StackPanel>
                 <StackPanel Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Center" Margin="20,0,0,0">
                     <TextBlock x:Name="TxtStats" Text="观看者：0" VerticalAlignment="Center"/>
