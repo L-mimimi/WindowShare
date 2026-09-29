@@ -16,8 +16,9 @@ dotnet test
 | `CongestionControllerTests` | 健康时维持、高 RTT 降码率、连续降档后降分辨率、最低档保护、高丢帧率触发降档、最小评估间隔、恢复不超初始值 |
 | `AppPathsTests` | 便携/安装模式数据目录决策、只读位置回退 `%APPDATA%`、环境变量优先级、设备 ID 稳定性 |
 | `VideoFormatPlannerTests` | 帧率档位、4K 上限、等比缩放取偶且不上采样、码率推算边界与单调性、`SuggestH264Level` 各档位、Level 展示名 |
+| `GopCacheTests` | GOP 缓存：以 IDR 开头才可补发、新 IDR 开启新一轮、帧数/字节越界后等到下一个 IDR 再积累、分辨率切换作废缓存、快照与后续追加互不干扰 |
 
-期望结果：**82/82 通过**。
+期望结果：**92/92 通过**。
 
 ## 2. 冒烟测试（真实捕获本机屏幕）
 
@@ -33,7 +34,7 @@ dotnet run --project tools/WindowShare.SmokeTest
 | Part2 | 合成运动图像 → GPU NV12 → H.264 → 文件 | ≥45 帧、≥30KB、含 SPS/PPS |
 | Part2b | 4K（3840×2160@30）与高帧率（1280×720@120）编码 | 4K 输出分辨率正确且码流能解回 3840×2160（解码帧数 ≥ 编码帧数的 80%）；120fps 档实际编码帧率不超过目标的 135%（帧率节流生效） |
 | Part3 | 真实捕获主显示器（WGC + GDI 双引擎） | 至少一个引擎出帧并编码成功 |
-| Part4 | 回环端到端：ShareSession + LAN 服务器 → 客户端 + 解码器（GDI 定速捕获） | 连接成功、加密启用、收帧 ≥40、解码帧数 ≥ 首个 IDR 后可解码帧数的 90% |
+| Part4 | 回环端到端：ShareSession + LAN 服务器 → 客户端 + 解码器（GDI 定速捕获） | 连接成功、加密启用、收帧 ≥40、解码帧数 ≥ 首个 IDR 后可解码帧数的 90%、**收到的第一帧就是 IDR**（GOP 补发生效） |
 | Part5 | 信令服务器回环（含错误密码负向用例） | 错误密码被拒、审批通过、取到 LAN 端点 |
 | Part6 | WebRTC 回环（DTLS-SRTP + H.264 RTP，GDI 定速捕获） | 连接成功、收帧 ≥30、解码帧数 ≥ 投喂帧数的 90% |
 
@@ -48,6 +49,10 @@ ffprobe -f h264 "$env:APPDATA\WindowShare\recordings\smoke-synthetic.h264"
 
 > Part4 / Part6 显式指定 `CaptureEnginePreference.Gdi`（定速轮询，出帧节奏与屏幕内容无关），
 > 避免静态桌面下 WGC 只出约 8fps 导致比例断言抖动；断言均为比例式而非绝对帧数。
+
+> Part4 连接前会等 `LanShareServer.CachedGopFrames > 0`（最多 10 秒），确保服务器已攒出
+> 一个以 IDR 开头的 GOP。本机 `Microsoft AVC DX12 Encoder` 对 `CODECAPI_AVEncVideoForceKeyFrame`
+> 返回 `E_NOTIMPL`，观看者能秒开完全依赖服务器补发缓存 GOP，「首帧即 IDR」就是它的回归网。
 
 ## 3. Host 自动验证（无 UI）
 
@@ -125,7 +130,7 @@ dotnet run --project src\WindowShare.Host -- --autotest
 powershell -ExecutionPolicy Bypass -File scripts\build.ps1 -Package
 ```
 
-- [ ] `installer\output\WindowShare-Setup-1.1.0.exe` 生成
+- [ ] `installer\output\WindowShare-Setup-1.1.1.exe` 生成
 - [ ] 双击安装（无需管理员权限），开始菜单出现 Host / Viewer 快捷方式
 - [ ] 从开始菜单启动 Host，功能与开发构建一致
 - [ ] 卸载后 `%APPDATA%\WindowShare`（白名单/设置）保留，程序目录被清理

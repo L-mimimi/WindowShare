@@ -31,7 +31,7 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
-$version = "1.1.0"
+$version = "1.1.1"
 
 # ---------- 定位 dotnet（必须带 SDK，优先 PATH，其次用户级安装目录） ----------
 function Test-DotnetSdk([string]$exe) {

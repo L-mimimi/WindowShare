@@ -6,21 +6,28 @@ Windows 只读屏幕/窗口共享软件：**Host 端**捕获整个屏幕或指�
 
 ## 下载（Windows x64）
 
-最新版本 **v1.1.0** ｜ [全部发布版本](https://github.com/L-mimimi/WindowShare/releases)
+最新版本 **v1.1.1** ｜ [全部发布版本](https://github.com/L-mimimi/WindowShare/releases)
 
 | 类型 | 文件 | 大小 | 说明 |
 |------|------|------|------|
-| 安装版 | [WindowShare-Setup-1.1.0.exe](https://github.com/L-mimimi/WindowShare/releases/download/v1.1.0/WindowShare-Setup-1.1.0.exe) | 87.9 MB | Inno Setup per-user 安装，**无需管理员权限**；数据写入 `%APPDATA%\WindowShare` |
-| 便携版 | [WindowShare-Portable-1.1.0.zip](https://github.com/L-mimimi/WindowShare/releases/download/v1.1.0/WindowShare-Portable-1.1.0.zip) | 122.2 MB | 解压即用，可放 U 盘；数据全部存于程序目录 `data\` |
+| 安装版 | [WindowShare-Setup-1.1.1.exe](https://github.com/L-mimimi/WindowShare/releases/download/v1.1.1/WindowShare-Setup-1.1.1.exe) | 87.9 MB | Inno Setup per-user 安装，**无需管理员权限**；数据写入 `%APPDATA%\WindowShare` |
+| 便携版 | [WindowShare-Portable-1.1.1.zip](https://github.com/L-mimimi/WindowShare/releases/download/v1.1.1/WindowShare-Portable-1.1.1.zip) | 122.2 MB | 解压即用，可放 U 盘；数据全部存于程序目录 `data\` |
 
 两者均为 self-contained（win-x64），目标机器**无需预装 .NET 运行时**。系统要求：Windows 10 1903（10.0.18362）或更高。
 
 校验（SHA256）：
 
 ```
-06c1ba5e2f4eea2d4d455d4d63aea40742b5317086431281b1d15df59ee3c629  WindowShare-Setup-1.1.0.exe
-5445206f27c184b8359cef3692904c81f6692907dae7984763543b2507c1bf67  WindowShare-Portable-1.1.0.zip
+f70fdd85ca537c94c6a62a90dd88e61ad58ab1f60b254fd26af5df4656596167  WindowShare-Setup-1.1.1.exe
+a9995b2a821d37e37f122900201a8d36e0fb7f1c3fc2d3db2ebdcaff7f70afca  WindowShare-Portable-1.1.1.zip
 ```
+
+## 1.1.1 更新
+
+- **观看者接入即出画面（不再黑屏等关键帧）**：Host 侧新增 GOP 缓存（`Core/Encoding/GopCache.cs`），保存自上一个 IDR 以来的全部编码帧；观看者认证通过的瞬间整段补发，因此它收到的第一帧必定是关键帧，画面当场可解。此前 `Microsoft AVC DX12 Encoder` 与软件 `H264 Encoder MFT` 对 `CODECAPI_AVEncVideoForceKeyFrame` 一律返回 `E_NOTIMPL`，「请求关键帧」根本不被认账，IDR 只按编码器内部 GOP 周期出现——静态桌面下实际帧率仅约 8fps，新观看者要黑屏干等好几秒。局域网直连与 WebRTC（房间号模式）两条通路都已覆盖，编码器与压缩率均不受影响。
+- **信令连不上时的日志不再误导**：日志与状态栏统一改用「可照着排查」的文案，例如 `无法连接 http://localhost:5000（ConnectionRefused）：请确认信令服务器已启动、地址与端口正确｜共享照常进行，仅房间号模式不可用；启动信令服务器后点「重试」即可`。此前日志只有 `由于目标计算机积极拒绝，无法连接。`，看着像共享失败，实际共享一直在跑。
+- **便携版说明补充**：写明信令服务器只负责房间号牵线、不承载画面数据，没启动也不影响局域网直连共享；本机试用填 `http://localhost:5000`。
+- **测试**：新增 `GopCacheTests`（10 项，合计 **92/92**）；冒烟测试 Part4 增加「收到的第一帧就是 IDR」的确定性断言（连接前先等 `LanShareServer.CachedGopFrames > 0`）。
 
 ## 1.1.0 更新
 
@@ -103,8 +110,13 @@ powershell -ExecutionPolicy Bypass -File scripts\build.ps1
 ```powershell
 # 在一台服务器（或内网某台机器）上启动信令
 dotnet run --project src\WindowShare.Signaling --urls http://0.0.0.0:5000
+
+# 也可以直接跑发布产物 / 便携版脚本
+#   dist\publish\signaling\WindowShare.Signaling.exe --urls http://0.0.0.0:5000
+#   便携版：双击「启动-信令服务器.bat」
 ```
 
+- 信令服务器**只服务「房间号模式」**，不承载画面数据；局域网直连不需要它，没启动也不影响已经开始的共享（Host 状态栏会给出原因与「重试」按钮）
 - Host：「信令服务器（房间号模式）」勾选，地址填 `http://<服务器>:5000`，开始共享
 - Viewer：选「房间号」，填入房间号 + 密码 + 信令地址 → 连接（自动 LAN 直连 → 失败回退 WebRTC）
 - 若 P2P 打洞失败，配置 TURN 环境变量（见 [docs/DEPLOY.md](docs/DEPLOY.md#4-turn-中继coturn)）
@@ -113,7 +125,7 @@ dotnet run --project src\WindowShare.Signaling --urls http://0.0.0.0:5000
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\build.ps1 -Package
-# 产出：installer\output\WindowShare-Setup-1.1.0.exe
+# 产出：installer\output\WindowShare-Setup-1.1.1.exe
 ```
 
 需要 Inno Setup 6/7（`winget install JRSoftware.InnoSetup`）；未安装时脚本会自动通过
@@ -123,7 +135,7 @@ NuGet 包 `Tools.InnoSetup` 获取编译器，无需手工安装。安装包为 
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\build.ps1 -Portable
-# 产出：dist\portable\WindowShare-Portable-1.1.0.zip（含目录版）
+# 产出：dist\portable\WindowShare-Portable-1.1.1.zip（含目录版）
 ```
 
 解压后直接双击 `启动-共享端.bat` / `启动-观看端.bat` 即可，**无需安装、无需 .NET 运行时**。
@@ -137,7 +149,7 @@ powershell -ExecutionPolicy Bypass -File scripts\build.ps1 -Portable
 | 界面提示 | Host 界面右上角显示「便携模式/安装模式」，📁 按钮直达数据目录 |
 
 ```
-WindowShare-Portable-1.1.0/
+WindowShare-Portable-1.1.1/
 ├── WindowShare.Host.exe        共享端
 ├── WindowShare.Viewer.exe      观看端
 ├── data\                       便携数据（logs / config / recordings）
