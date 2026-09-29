@@ -38,6 +38,7 @@ public partial class MainWindow : Window
         _uiTimer.Start();
         TxtMode.Text = AppPaths.ModeDescription;
         TxtMode.ToolTip = AppPaths.Root;
+        ApplyConnMode();
         Logger.LogEmitted += OnLogEmitted;
     }
 
@@ -45,24 +46,27 @@ public partial class MainWindow : Window
 
     private void BtnConnect_Click(object sender, RoutedEventArgs e)
     {
-        var password = TxtPwd.Password;
-        string host;
-        int port;
+        // 按当前选中的模式分发：两种模式各有独立的密码输入框，互不干扰
+        if (RbRoom.IsChecked == true) _ = ConnectRoomFlowAsync();
+        else ConnectDirectFlow();
+    }
 
-        if (RbRoom.IsChecked == true)
+    /// <summary>直连 IP 模式：校验地址/端口/密码后建立 LAN TCP 会话</summary>
+    private void ConnectDirectFlow()
+    {
+        var host = TxtHost.Text.Trim();
+        var password = TxtPwd.Password;
+
+        if (host.Length == 0)
         {
-            // 房间号模式：经信令服务器（批6 接入）；此处先提示
-            MessageBox.Show("房间号模式需要信令服务器（详见 docs/DEPLOY.md）。\n" +
-                            "局域网内请使用「直连 IP」模式。",
-                "提示", MessageBoxButton.OK, MessageBoxImage.Information);
+            MessageBox.Show("请输入 Host 的 IP 地址或主机名。", "提示", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
-
-        if (!System.Net.IPAddress.TryParse(TxtHost.Text.Trim(), out _))
+        if (!System.Net.IPAddress.TryParse(host, out _))
         {
             try
             {
-                var addrs = System.Net.Dns.GetHostAddresses(TxtHost.Text.Trim());
+                var addrs = System.Net.Dns.GetHostAddresses(host);
                 if (addrs.Length == 0) throw new Exception("无解析结果");
             }
             catch (Exception ex)
@@ -71,38 +75,95 @@ public partial class MainWindow : Window
                 return;
             }
         }
-        host = TxtHost.Text.Trim();
-        if (!int.TryParse(TxtPort.Text.Trim(), out port) || port is < 1 or > 65535)
+        if (!int.TryParse(TxtPort.Text.Trim(), out var port) || port is < 1 or > 65535)
         {
-            MessageBox.Show("端口无效", "提示", MessageBoxButton.OK, MessageBoxImage.Information);
+            MessageBox.Show("端口无效（1-65535，默认 48750）。", "提示", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
         if (string.IsNullOrEmpty(password))
         {
-            MessageBox.Show("请输入密码", "提示", MessageBoxButton.OK, MessageBoxImage.Information);
+            MessageBox.Show("请输入密码（Host 界面「会话信息」中显示）。",
+                "提示", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
 
+        PrepareSession();
         StartSession(host, port, password);
     }
 
-    private void StartSession(string host, int port, string password)
+    /// <summary>
+    /// 房间号模式：校验输入 → 信令加入房间 → Host 审批 → 取 LAN 端点直连，
+    /// 全部失败回退 WebRTC。失败时恢复按钮状态，便于修正输入后重试。
+    /// </summary>
+    private async System.Threading.Tasks.Task ConnectRoomFlowAsync()
     {
-        // 清理旧会话
+        var room = TxtRoom.Text.Trim().ToUpperInvariant();
+        var password = TxtRoomPwd.Password;
+        var signalingUrl = TxtSignaling.Text.Trim();
+
+        if (room.Length < 4)
+        {
+            MessageBox.Show("请输入房间号（Host 界面「会话信息」中显示，6 位字母数字）。",
+                "提示", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        if (string.IsNullOrEmpty(password))
+        {
+            MessageBox.Show("请输入房间密码（Host 界面「会话信息」中显示）。",
+                "提示", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        if (!signalingUrl.StartsWith("http://", StringComparison.OrdinalIgnoreCase) &&
+            !signalingUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+        {
+            MessageBox.Show($"信令服务器地址需以 http:// 或 https:// 开头。\n当前：{(signalingUrl.Length == 0 ? "（空）" : signalingUrl)}",
+                "提示", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        PrepareSession();
+        try
+        {
+            await ConnectViaRoomAsync(signalingUrl, room, password);
+        }
+        catch (Exception ex)
+        {
+            Logger.Error("Viewer", "房间号模式连接异常", ex);
+            TxtState.Text = $"状态：连接失败（{ex.Message}）";
+        }
+        finally
+        {
+            // 既没有 LAN 客户端也没有 WebRTC 接收器 → 本次接入未建立，恢复按钮让用户重试
+            if (_client == null && _webRtcReceiver == null)
+            {
+                BtnConnect.IsEnabled = true;
+                BtnDisconnect.IsEnabled = false;
+                TxtPlaceholder.Visibility = Visibility.Visible;
+            }
+        }
+    }
+
+    /// <summary>建立新会话前的公共准备（两种模式共用）：清理旧会话、重建解码器、切换按钮状态</summary>
+    private void PrepareSession()
+    {
         TeardownSession();
 
         _firstKeyframeSeen = false;
         _decoder = new MfH264Decoder();
         _decoder.Decoded += OnDecodedFrame;
 
+        BtnConnect.IsEnabled = false;
+        BtnDisconnect.IsEnabled = true;
+        TxtPlaceholder.Visibility = Visibility.Collapsed;
+    }
+
+    /// <summary>直连 IP：建立 LAN TCP 会话（调用前需先 PrepareSession）</summary>
+    private void StartSession(string host, int port, string password)
+    {
         _client = new LanShareClient(host, port,
             AppPaths.GetOrCreateDeviceId(), AppPaths.GetMachineName(), password);
         AttachClient(_client);
         _client.Start();
-
-        BtnConnect.IsEnabled = false;
-        BtnDisconnect.IsEnabled = true;
-        TxtPlaceholder.Visibility = Visibility.Collapsed;
     }
 
     /// <summary>
@@ -168,9 +229,10 @@ public partial class MainWindow : Window
         // LAN 直连全部失败 → WebRTC 回退（SDP/ICE 经信令中继，媒体 DTLS-SRTP 端到端）
         await StartWebRtcFallbackAsync(signaling, room);
 
-        TxtState.Text = "状态：正在尝试 WebRTC 连接…";
-        BtnConnect.IsEnabled = true;
-        BtnDisconnect.IsEnabled = false;
+        // WebRTC 协商期间保持「断开」可用：用户可随时取消，而不是被迫等待
+        TxtState.Text = "状态：局域网直连失败，正在尝试 WebRTC…";
+        BtnConnect.IsEnabled = false;
+        BtnDisconnect.IsEnabled = true;
     }
 
     /// <summary>WebRTC 回退：请求 Host 发起 offer</summary>
@@ -370,9 +432,22 @@ public partial class MainWindow : Window
             TxtLatency.Text = $"延迟：≈{_lastRttMs / 2:F0} ms（网络单向）";
     }
 
-    private void ModeChanged(object sender, System.Windows.Controls.TextChangedEventArgs e)
+    /// <summary>切换连接模式：只启用当前模式的输入区，避免往不生效的框里输入</summary>
+    private void ConnMode_Checked(object sender, RoutedEventArgs e) => ApplyConnMode();
+
+    private void ApplyConnMode()
     {
-        // 房间号/直连输入互斥提示（简单处理）
+        if (PanelRoom == null || TxtModeHint == null) return;   // InitializeComponent 期间
+        var room = RbRoom.IsChecked == true;
+        PanelRoom.IsEnabled = room;
+        PanelDirect.IsEnabled = !room;
+        TxtModeHint.Text = room
+            ? "房间号与密码见 Host 界面「会话信息」；需 Host 端已勾选并连上信令服务器"
+            : "Host 地址与密码见 Host 界面「会话信息」；需与 Host 处于同一局域网";
+        // 窗口尚未显示时不抢焦点（构造期间 ApplyConnMode 也会走到这里）
+        if (!IsLoaded) return;
+        if (room) TxtRoom.Focus();
+        else TxtHost.Focus();
     }
 
     private void OnLogEmitted(LogLevel level, DateTime time, string message)
