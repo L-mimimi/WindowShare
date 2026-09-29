@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    打包工具依赖：仅用于获取 Inno Setup 编译器（ISCC.exe），不参与产品构建。
+    由 scripts/build.ps1 在未安装 Inno Setup 时复制到 tools/.packtools 并还原。
+  -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <OutputType>Library</OutputType>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Tools.InnoSetup" Version="7.1.0" GeneratePathProperty="true" ExcludeAssets="all" />
+  </ItemGroup>
+
+</Project>

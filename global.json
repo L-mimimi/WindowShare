@@ -1,0 +1,8 @@
+{
+  // 锁定 .NET 8 SDK；latestMinor 允许 8.0.x 任意补丁/功能带
+  "sdk": {
+    "version": "8.0.100",
+    "rollForward": "latestMinor",
+    "allowPrerelease": false
+  }
+}

@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <!-- 信令服务器：房间号注册/加入、设备上线、SDP/ICE 中继（ASP.NET Core + SignalR） -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <RootNamespace>WindowShare.Signaling</RootNamespace>
+  </PropertyGroup>
+
+</Project>

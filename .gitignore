@@ -1,0 +1,12 @@
+bin/
+obj/
+*.user
+.vs/
+*.log
+dist/
+installer/output/
+*.h264
+tools/.packtools/
+
+# 代理会话计划文件，不入库
+.zcode/

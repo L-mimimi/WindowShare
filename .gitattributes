@@ -1,0 +1,9 @@
+# 便携版启动脚本：cmd 在中文 Windows 上按 GBK 解释 .bat 内容，
+# 故工作区使用 GBK 编码，仓库内统一存为 UTF-8。
+*.bat text eol=crlf working-tree-encoding=GBK
+
+# 统一换行，避免跨平台差异
+*.cs   text eol=crlf
+*.xaml text eol=crlf
+*.ps1  text eol=crlf
+*.iss  text eol=crlf

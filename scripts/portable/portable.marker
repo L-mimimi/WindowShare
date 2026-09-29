@@ -1,0 +1,20 @@
+﻿WindowShare 便携版标记
+========================
+
+此文件的存在表示：WindowShare 运行在【便携模式】。
+
+便携模式行为
+------------
+- 所有数据存放在本目录下的 data\ 文件夹，不写入 %APPDATA%：
+    data\logs\         日志
+    data\config\       设备 ID、设备白名单
+    data\recordings\   编码验证输出的 .h264 文件
+- 可以整个文件夹拷到 U 盘或另一台电脑，直接双击运行，配置与白名单一起带走。
+- 删除本文件即恢复为安装模式（数据改存 %APPDATA%\WindowShare）。
+
+注意
+----
+- 如果程序所在位置不可写（例如刻录光盘、写保护的 U 盘），
+  程序会自动回退到 %APPDATA%\WindowShare 并在日志中说明，不会启动失败。
+- 也可以用环境变量显式指定数据目录（优先级最高）：
+    set WINDOWSHARE_DATA_DIR=D:\MyData

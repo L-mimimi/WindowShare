@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- 公共库：捕获/编码/解码/网络/协议/安全等，不含 UI -->
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>WindowShare.Core</RootNamespace>
+    <Description>WindowShare 公共模块（只读屏幕/窗口共享，无任何输入注入功能）</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 单元测试可访问 internal 成员（路径决策等纯逻辑） -->
+    <InternalsVisibleTo Include="WindowShare.Core.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- D3D11/DXGI/Media Foundation 互操作（屏幕捕获与 H.264 编解码） -->
+    <PackageReference Include="Vortice.Direct3D11" Version="3.6.2" />
+    <PackageReference Include="Vortice.DXGI" Version="3.6.2" />
+    <PackageReference Include="Vortice.MediaFoundation" Version="3.6.2" />
+    <!-- SignalR 客户端（信令） -->
+    <PackageReference Include="Microsoft.AspNetCore.SignalR.Client" Version="8.0.11" />
+    <!-- WebRTC（ICE/STUN/TURN/DTLS-SRTP/RTP，纯 .NET 实现） -->
+    <PackageReference Include="SIPSorcery" Version="8.0.0" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,652 @@
+using System.Collections.Concurrent;
+using System.Runtime.InteropServices;
+using SharpGen.Runtime;
+using Vortice.Direct3D11;
+using Vortice.MediaFoundation;
+using WindowShare.Core.Logging;
+
+namespace WindowShare.Core.Encoding;
+
+/// <summary>
+/// Media Foundation H.264 编码器（双模式）：
+///   - 异步模式（首选）：经典硬件 MFT（NVENC/QSV/AMF）或 Win11 的 "Microsoft AVC DX12 Encoder"
+///     （D3D12 视频编码，在新 GPU 上走硬件）。事件泵线程驱动 NeedInput/HaveOutput。
+///   - 同步模式：普通同步 MFT（如系统软件编码器），ProcessInput + 抽干 ProcessOutput。
+///   - 支持 D3D11 纹理零拷贝输入（MFT 为 D3D11Aware 且提供了共享设备）。
+/// 选择顺序：硬件 MFT → AVC DX12 → 软件同步 MFT（按本机实际可用性自动探测）。
+/// </summary>
+public sealed class MfH264Encoder : IDisposable
+{
+    private static readonly Guid TransformIid = new("bf94c121-5b05-4e6f-8000-ba598961414d");
+    private static readonly Guid Texture2dIid = new("6F15AAF2-D208-4E89-9AB4-489535D34F9C");
+
+    // MF 错误码
+    private const int MfETransformNeedMoreInput = unchecked((int)0xC00D6D72);
+    private const int MfETransformStreamChange = unchecked((int)0xC00D6D61);
+
+    // MFT_ENUM_FLAG（mfapi.h）
+    private const uint MftEnumFlagSyncmft = 0x01;
+    private const uint MftEnumFlagHardware = 0x04;
+    private const uint MftEnumFlagLocalmft = 0x10;
+    private const uint MftEnumFlagSortandfilter = 0x40;
+    private const uint MftEnumFlagAll = 0x3F;
+
+    // 异步 MFT 事件（mfobjects.h MediaEventType）
+    private const int MeTransformNeedInput = 601;
+    private const int MeTransformHaveOutput = 602;
+    private const int MeTransformDrainComplete = 603;
+
+    // 输出流信息标志：MFT 自己分配输出样本
+    private const int MftOutputStreamProvidesSamples = 0x1;
+
+    private static readonly object MfGate = new();
+    private static int _mfRefCount;
+
+    /// <summary>Media Foundation 全局初始化（引用计数；完整初始化，LITE 模式会导致部分 MFT 异常）</summary>
+    private static void EnsureMfStartup()
+    {
+        lock (MfGate)
+        {
+            if (_mfRefCount++ == 0)
+            {
+                try
+                {
+                    MediaFactory.MFStartup(false);
+                    Logging.Logger.Debug("MF", "MFStartup(完整) 完成");
+                }
+                catch
+                {
+                    _mfRefCount--;
+                }
+            }
+        }
+    }
+
+    private static void MfShutdownRef()
+    {
+        lock (MfGate)
+        {
+            if (--_mfRefCount == 0)
+            {
+                try { MediaFactory.MFShutdown(); } catch { }
+            }
+        }
+    }
+
+    public string EncoderName { get; }
+    public bool IsHardware { get; }
+    public bool IsD3DAccelerated => _d3dManager != null;
+    public bool IsAsyncMode => _asyncEventGenerator != null;
+
+    /// <summary>编码输出事件（编码线程上触发，回调不要阻塞）</summary>
+    public event Action<EncodedVideoFrame>? Encoded;
+
+    private readonly EncoderSettings _settings;
+    private readonly IMFTransform _transform;
+    private readonly IMFDXGIDeviceManager? _d3dManager;
+    private readonly bool _providesOutputSamples;
+    private readonly object _encodeGate = new();
+
+    // 异步模式状态
+    private IMFMediaEventGenerator? _asyncEventGenerator;
+    private Thread? _pumpThread;
+    private readonly SemaphoreSlim _inputSlots = new(0); // NeedInput 事件计数
+    private volatile bool _disposed;
+    private volatile bool _pumpRunning;
+
+    /// <summary>创建编码器；device 非 null 时优先启用 D3D 零拷贝输入</summary>
+    public MfH264Encoder(EncoderSettings settings, ID3D11Device? device = null, bool hardwarePreferred = true)
+    {
+        _settings = settings;
+        EnsureMfStartup();
+
+        var selected = SelectEncoder(hardwarePreferred);
+        IsHardware = selected.IsHardware;
+        EncoderName = selected.Name;
+        _transform = selected.Transform;
+
+        // 解锁异步 MFT + 声明 D3D11 感知
+        try
+        {
+            var attrs = _transform.Attributes;
+            attrs?.Set(TransformAttributeKeys.TransformAsyncUnlock, 1u);
+        }
+        catch { /* 同步 MFT 无此属性，忽略 */ }
+
+        // D3D 设备管理器（零拷贝路径；DX12 编码器必须先设置才能成功配置类型）
+        if (device != null && selected.RequiresD3DManager)
+        {
+            try
+            {
+                var manager = MediaFactory.MFCreateDXGIDeviceManager();
+                manager.ResetDevice(device);
+                _transform.ProcessMessage(TMessageType.MessageSetD3DManager, (nuint)manager.NativePointer);
+                _d3dManager = manager;
+                Logging.Logger.Info("MF", $"D3D 设备管理器已设置: {selected.Name}");
+            }
+            catch (Exception ex)
+            {
+                Logging.Logger.Warn("MF", $"D3D 设备管理器设置失败: {ex.Message}");
+                _d3dManager = null;
+            }
+        }
+
+        // 配置类型（输出 → 输入）
+        ConfigureTypes();
+
+        // 输出流信息：判断是否需要调用方预分配输出样本
+        try
+        {
+            var info = _transform.GetOutputStreamInfo(0);
+            _providesOutputSamples = (info.Flags & MftOutputStreamProvidesSamples) != 0;
+        }
+        catch
+        {
+            _providesOutputSamples = false;
+        }
+
+        ConfigureCodecApi();
+
+        // 启动流消息
+        _transform.ProcessMessage(TMessageType.MessageNotifyBeginStreaming, UIntPtr.Zero);
+        _transform.ProcessMessage(TMessageType.MessageNotifyStartOfStream, UIntPtr.Zero);
+
+        // 异步 MFT：启动事件泵线程
+        try
+        {
+            _asyncEventGenerator = _transform.QueryInterface<IMFMediaEventGenerator>();
+            _pumpRunning = true;
+            _pumpThread = new Thread(PumpLoop)
+            {
+                Name = "MfEncoderPump",
+                IsBackground = true,
+                Priority = ThreadPriority.AboveNormal,
+            };
+            _pumpThread.Start();
+            Logging.Logger.Info("MF", $"异步事件泵已启动: {selected.Name}");
+        }
+        catch
+        {
+            _asyncEventGenerator = null; // 同步 MFT
+        }
+
+        Logging.Logger.Info("MF",
+            $"编码器就绪: {EncoderName} (硬件={IsHardware}, 零拷贝={IsD3DAccelerated}, " +
+            $"模式={(IsAsyncMode ? "异步" : "同步")}, {settings.Width}x{settings.Height}@{settings.Fps}, " +
+            $"{settings.BitrateBps / 1000}kbps)");
+    }
+
+    // ===== 编码器选择 =====
+
+    private sealed record SelectedEncoder(IMFTransform Transform, string Name, bool IsHardware, bool RequiresD3DManager);
+
+    private static SelectedEncoder SelectEncoder(bool hardwarePreferred)
+    {
+        var errors = new List<string>();
+
+        // 1) 经典硬件 MFT（NVENC/QSV/AMF 注册的 Media Foundation 硬件编码器）
+        if (hardwarePreferred)
+        {
+            try
+            {
+                var hw = EnumActivators(MftEnumFlagHardware | MftEnumFlagSortandfilter);
+                if (hw.Count > 0)
+                {
+                    var (t, n) = Activate(hw[0]);
+                    return new SelectedEncoder(t, n, true, true);
+                }
+            }
+            catch (Exception ex) { errors.Add($"硬件MFT: {ex.Message}"); }
+            Logging.Logger.Info("MF", "无注册的硬件编码器 MFT，尝试 AVC DX12 编码器");
+        }
+
+        // 2) Microsoft AVC DX12 编码器（Win11 24H2+，D3D12 视频 encode，新 GPU 上为硬件）
+        try
+        {
+            foreach (var act in EnumActivators(MftEnumFlagAll))
+            {
+                string name;
+                try { name = act.GetString(TransformAttributeKeys.MftFriendlyNameAttribute); }
+                catch { name = ""; }
+
+                if (!name.Equals("Microsoft AVC DX12 Encoder", StringComparison.OrdinalIgnoreCase))
+                {
+                    act.Dispose();
+                    continue;
+                }
+                var (t, n) = Activate(act);
+                // 预检：类型能否配置（有些机器上 DX12 编码器枚举得到但资源分配失败）
+                return new SelectedEncoder(t, n, true, true);
+            }
+        }
+        catch (Exception ex) { errors.Add($"AVC DX12: {ex.Message}"); }
+
+        // 3) 系统软件编码器（同步）
+        try
+        {
+            var sw = EnumActivators(MftEnumFlagSyncmft | MftEnumFlagLocalmft | MftEnumFlagSortandfilter);
+            if (sw.Count > 0)
+            {
+                var (t, n) = Activate(sw[0]);
+                return new SelectedEncoder(t, n, false, false);
+            }
+        }
+        catch (Exception ex) { errors.Add($"软件MFT: {ex.Message}"); }
+
+        throw new InvalidOperationException("未找到可用的 H.264 编码器: " + string.Join("; ", errors));
+    }
+
+    private static (IMFTransform Transform, string Name) Activate(IMFActivate activate)
+    {
+        var name = "<unknown>";
+        try { name = activate.GetString(TransformAttributeKeys.MftFriendlyNameAttribute); }
+        catch { }
+        activate.ActivateObject(out IMFTransform transform).CheckError();
+        return (transform, name);
+    }
+
+    /// <summary>枚举 MFT 激活对象（调用方负责 Dispose）</summary>
+    private static List<IMFActivate> EnumActivators(uint flags)
+    {
+        var result = new List<IMFActivate>();
+        MediaFactory.MFTEnumEx(TransformCategoryGuids.VideoEncoder, flags, null, null,
+            out var ptrs, out var count);
+        for (var i = 0; i < count; i++)
+        {
+            var p = Marshal.ReadIntPtr(ptrs, i * IntPtr.Size);
+            if (p != IntPtr.Zero)
+                result.Add(new IMFActivate(p));
+        }
+        Marshal.FreeCoTaskMem(ptrs);
+        return result;
+    }
+
+    /// <summary>枚举可用编码器名（诊断用）</summary>
+    public static IReadOnlyList<string> ProbeEncoders()
+    {
+        var names = new List<string>();
+        try
+        {
+            EnsureMfStartup();
+            foreach (var act in EnumActivators(MftEnumFlagAll))
+            {
+                try { names.Add(act.GetString(TransformAttributeKeys.MftFriendlyNameAttribute)); }
+                catch { names.Add("<unknown>"); }
+                act.Dispose();
+            }
+        }
+        catch (Exception ex)
+        {
+            Logging.Logger.Warn("MF", "枚举编码器失败: " + ex.Message);
+        }
+        return names;
+    }
+
+    // ===== 媒体类型与 CodecAPI =====
+
+    private void ConfigureTypes()
+    {
+        var outType = MediaFactory.MFCreateMediaType();
+        outType.Set(MediaTypeAttributeKeys.MajorType, MediaTypeGuids.Video);
+        outType.Set(MediaTypeAttributeKeys.Subtype, VideoFormatGuids.H264);
+        outType.Set(MediaTypeAttributeKeys.FrameSize, Pack2(_settings.Width, _settings.Height));
+        outType.Set(MediaTypeAttributeKeys.FrameRate, Pack2(_settings.Fps, 1));
+        outType.Set(MediaTypeAttributeKeys.InterlaceMode, 2u); // Progressive
+        outType.Set(MediaTypeAttributeKeys.AvgBitrate, (uint)_settings.BitrateBps);
+        _transform.SetOutputType(0, outType, 0);
+        outType.Dispose();
+
+        var inType = MediaFactory.MFCreateMediaType();
+        inType.Set(MediaTypeAttributeKeys.MajorType, MediaTypeGuids.Video);
+        inType.Set(MediaTypeAttributeKeys.Subtype, VideoFormatGuids.NV12);
+        inType.Set(MediaTypeAttributeKeys.FrameSize, Pack2(_settings.Width, _settings.Height));
+        inType.Set(MediaTypeAttributeKeys.FrameRate, Pack2(_settings.Fps, 1));
+        inType.Set(MediaTypeAttributeKeys.InterlaceMode, 2u);
+        inType.Set(MediaTypeAttributeKeys.AllSamplesIndependent, 1u);
+        _transform.SetInputType(0, inType, 0);
+        inType.Dispose();
+    }
+
+    private void ConfigureCodecApi()
+    {
+        var p = _transform.NativePointer;
+        CodecApi.TrySetUint32(p, CodecApi.AvEncCommonRateControlMode, 0); // CBR
+        CodecApi.TrySetUint32(p, CodecApi.AvEncCommonMeanBitRate, (uint)_settings.BitrateBps);
+        CodecApi.TrySetUint32(p, CodecApi.AvLowLatencyMode, 1);
+        if (_settings.GopSize > 0)
+            CodecApi.TrySetUint32(p, CodecApi.AvEncMPVGopSize, (uint)_settings.GopSize);
+        CodecApi.TrySetUint32(p, CodecApi.AvScenarioInfo, 1); // DisplayRemoting
+    }
+
+    // ===== 输入 API =====
+
+    /// <summary>编码一帧 NV12 GPU 纹理（零拷贝）</summary>
+    public void EncodeNv12Texture(ID3D11Texture2D nv12Texture, long timestampUtc)
+    {
+        if (_disposed) throw new ObjectDisposedException(nameof(MfH264Encoder));
+        if (!IsD3DAccelerated)
+            throw new InvalidOperationException("未启用 D3D 路径，请使用 EncodeNv12Bytes");
+
+        var sample = CreateTextureSample(nv12Texture, timestampUtc);
+        SubmitSample(sample);
+    }
+
+    /// <summary>编码一帧 NV12 系统内存数据（stride=width）</summary>
+    public void EncodeNv12Bytes(byte[] nv12, long timestampUtc)
+    {
+        if (_disposed) throw new ObjectDisposedException(nameof(MfH264Encoder));
+
+        var sample = CreateMemorySample(nv12, timestampUtc);
+        SubmitSample(sample);
+    }
+
+    private void SubmitSample(IMFSample sample)
+    {
+        if (IsAsyncMode)
+        {
+            // 异步模式：等待 NeedInput 槽位（由事件泵计数），在调用线程上提交。
+            // 最多等 500ms；超时说明编码器消费不及时，丢帧以维持实时性。
+            if (!_inputSlots.Wait(500))
+            {
+                sample.Dispose();
+                Logging.Logger.Debug("MF", "等待 NeedInput 超时，丢弃一帧");
+                return;
+            }
+            try
+            {
+                _transform.ProcessInput(0, sample, 0);
+            }
+            finally
+            {
+                sample.Dispose();
+            }
+        }
+        else
+        {
+            lock (_encodeGate)
+            {
+                try
+                {
+                    _transform.ProcessInput(0, sample, 0);
+                }
+                finally
+                {
+                    sample.Dispose();
+                }
+                DrainOutputsSync();
+            }
+        }
+    }
+
+    private IMFSample CreateTextureSample(ID3D11Texture2D texture, long timestampUtc)
+    {
+        var buffer = MediaFactory.MFCreateDXGISurfaceBuffer(Texture2dIid, texture, 0, false);
+        var sample = MediaFactory.MFCreateSample();
+        sample.AddBuffer(buffer);
+        buffer.Dispose();
+        sample.SampleTime = timestampUtc;
+        sample.SampleDuration = 10_000_000L / Math.Max(1, _settings.Fps);
+        return sample;
+    }
+
+    private IMFSample CreateMemorySample(byte[] nv12, long timestampUtc)
+    {
+        var buffer = MediaFactory.MFCreateMemoryBuffer(nv12.Length);
+        buffer.Lock(out var data, out _, out _);
+        Marshal.Copy(nv12, 0, data, nv12.Length);
+        buffer.Unlock();
+        buffer.CurrentLength = nv12.Length;
+
+        var sample = MediaFactory.MFCreateSample();
+        sample.AddBuffer(buffer);
+        buffer.Dispose();
+        sample.SampleTime = timestampUtc;
+        sample.SampleDuration = 10_000_000L / Math.Max(1, _settings.Fps);
+        return sample;
+    }
+
+    // ===== 异步事件泵 =====
+
+    /// <summary>异步 MFT 事件泵：NeedInput → 释放槽位；HaveOutput → 取输出</summary>
+    private void PumpLoop()
+    {
+        var eg = _asyncEventGenerator!;
+        while (_pumpRunning && !_disposed)
+        {
+            IMFMediaEvent? evt = null;
+            try
+            {
+                evt = eg.GetEvent(1); // MF_EVENT_FLAG_NO_WAIT：轮询模式，保证可响应退出
+                if (evt == null)
+                {
+                    Thread.Sleep(2);
+                    continue;
+                }
+            }
+            catch (SharpGenException ex) when ((uint)ex.HResult == 0xC00D3E80) // MF_E_NO_EVENTS_AVAILABLE
+            {
+                Thread.Sleep(2);
+                continue;
+            }
+            catch (Exception ex)
+            {
+                if (_pumpRunning && !_disposed)
+                    Logging.Logger.Error("MF", "事件泵异常", ex);
+                Thread.Sleep(10);
+                continue;
+            }
+
+            using (evt)
+            {
+                var type = (int)evt.EventType;
+                try
+                {
+                    switch (type)
+                    {
+                        case MeTransformNeedInput:
+                            _inputSlots.Release();
+                            break;
+
+                        case MeTransformHaveOutput:
+                            ProcessOutputOnce();
+                            break;
+
+                        case MeTransformDrainComplete:
+                            break;
+                    }
+                }
+                catch (SharpGenException ex) when (ex.HResult == MfETransformStreamChange)
+                {
+                    Logging.Logger.Info("MF", "输出流格式变化（异步）");
+                }
+                catch (Exception ex)
+                {
+                    Logging.Logger.Error("MF", $"事件处理异常 (type={type})", ex);
+                }
+            }
+        }
+    }
+
+    /// <summary>执行一次 ProcessOutput 并派发编码结果</summary>
+    private void ProcessOutputOnce()
+    {
+        var outBuf = new OutputDataBuffer { StreamID = 0 };
+        try
+        {
+            if (!_providesOutputSamples)
+            {
+                // 调用方预分配输出样本（多数同步/部分异步 MFT 要求）
+                var info = SafeGetOutputStreamInfo();
+                var size = info > 0 ? info : 4 * 1024 * 1024;
+                var outSample = MediaFactory.MFCreateSample();
+                var outBuffer = MediaFactory.MFCreateMemoryBuffer(size);
+                outSample.AddBuffer(outBuffer);
+                outBuffer.Dispose();
+                outBuf.Sample = outSample;
+            }
+
+            var result = _transform.ProcessOutput(ProcessOutputFlags.None, 1, ref outBuf, out _);
+            if (result.Failure)
+            {
+                if (result.Code == MfETransformNeedMoreInput || result.Code == MfETransformStreamChange)
+                    return;
+                result.CheckError();
+                return;
+            }
+
+            var sample = outBuf.Sample;
+            if (sample == null) return;
+            try
+            {
+                EmitSample(sample);
+            }
+            finally
+            {
+                sample.Dispose();
+            }
+        }
+        catch (SharpGenException ex) when (ex.HResult == MfETransformNeedMoreInput ||
+                                            ex.HResult == MfETransformStreamChange)
+        {
+            outBuf.Sample?.Dispose();
+        }
+        catch (Exception)
+        {
+            outBuf.Sample?.Dispose();
+            throw;
+        }
+    }
+
+    private int SafeGetOutputStreamInfo()
+    {
+        try { return _transform.GetOutputStreamInfo(0).Size; }
+        catch { return 0; }
+    }
+
+    /// <summary>把输出样本转换为 EncodedVideoFrame 并回调</summary>
+    private void EmitSample(IMFSample outSample)
+    {
+        using var buffer = outSample.ConvertToContiguousBuffer();
+        buffer.Lock(out var ptr, out _, out var length);
+        try
+        {
+            if (length <= 0) return;
+            var data = new byte[length];
+            Marshal.Copy(ptr, data, 0, length);
+
+            var frame = new EncodedVideoFrame
+            {
+                Data = data,
+                Keyframe = AnnexB.IsKeyframe(data),
+                TimestampUtc = outSample.SampleTime != 0 ? outSample.SampleTime : DateTime.UtcNow.Ticks,
+                Width = _settings.Width,
+                Height = _settings.Height,
+            };
+            Encoded?.Invoke(frame);
+        }
+        finally
+        {
+            try { buffer.Unlock(); } catch { }
+        }
+    }
+
+    // ===== 同步模式抽干 =====
+
+    private void DrainOutputsSync()
+    {
+        while (true)
+        {
+            var outBuf = new OutputDataBuffer { StreamID = 0 };
+            Result result;
+            try
+            {
+                if (!_providesOutputSamples)
+                {
+                    var size = SafeGetOutputStreamInfo();
+                    var outSample = MediaFactory.MFCreateSample();
+                    var outBuffer = MediaFactory.MFCreateMemoryBuffer(size > 0 ? size : 1024 * 1024);
+                    outSample.AddBuffer(outBuffer);
+                    outBuffer.Dispose();
+                    outBuf.Sample = outSample;
+                }
+                result = _transform.ProcessOutput(ProcessOutputFlags.None, 1, ref outBuf, out _);
+            }
+            catch (SharpGenException ex) when (ex.HResult == MfETransformNeedMoreInput ||
+                                                ex.HResult == MfETransformStreamChange)
+            {
+                outBuf.Sample?.Dispose();
+                if (ex.HResult == MfETransformStreamChange)
+                    continue;
+                return;
+            }
+            catch (Exception)
+            {
+                outBuf.Sample?.Dispose();
+                throw;
+            }
+
+            if (result.Failure)
+            {
+                outBuf.Sample?.Dispose();
+                if (result.Code == MfETransformNeedMoreInput) return;
+                if (result.Code == MfETransformStreamChange) continue;
+                result.CheckError();
+                return;
+            }
+
+            var sample = outBuf.Sample;
+            if (sample == null) return;
+            try { EmitSample(sample); }
+            finally { sample.Dispose(); }
+        }
+    }
+
+    // ===== 控制 =====
+
+    /// <summary>请求下一帧为关键帧</summary>
+    public bool ForceKeyFrame() =>
+        CodecApi.TrySetUint32(_transform.NativePointer, CodecApi.AvEncVideoForceKeyFrame, 1);
+
+    /// <summary>运行中调整码率</summary>
+    public bool SetBitrate(int bitrateBps) =>
+        CodecApi.TrySetUint32(_transform.NativePointer, CodecApi.AvEncCommonMeanBitRate, (uint)bitrateBps);
+
+    /// <summary>
+    /// 打包宽高到 UINT64（MF_MT_FRAME_SIZE 格式：高 32 位=宽，低 32 位=高，与 MFSetAttributeSize 一致）。
+    /// </summary>
+    private static ulong Pack2(int width, int height) =>
+        ((ulong)(uint)width << 32) | (uint)height;
+
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+
+        if (IsAsyncMode)
+        {
+            _pumpRunning = false;
+            try
+            {
+                // 唤醒轮询线程
+                _asyncEventGenerator?.QueueEvent(0, Guid.Empty, Result.Ok, null);
+            }
+            catch { }
+            _pumpThread?.Join(1500);
+            _inputSlots.Dispose();
+        }
+
+        lock (_encodeGate)
+        {
+            try
+            {
+                _transform.ProcessMessage(TMessageType.MessageNotifyEndOfStream, UIntPtr.Zero);
+                _transform.ProcessMessage(TMessageType.MessageCommandFlush, UIntPtr.Zero);
+            }
+            catch { }
+            _d3dManager?.Dispose();
+            _transform.Dispose();
+        }
+        MfShutdownRef();
+        Logging.Logger.Info("MF", "编码器已释放");
+    }
+}
