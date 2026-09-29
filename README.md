@@ -4,6 +4,24 @@ Windows 只读屏幕/窗口共享软件：**Host 端**捕获整个屏幕或指�
 
 > **本项目为只读共享**：不包含任何远程控制功能，不生成任何输入注入代码（无 SendInput / keybd_event / mouse_event / 反向输入通道），不包含 Android 端，不涉及权限提升。
 
+## 下载（Windows x64）
+
+最新版本 **v1.0.0** ｜ [全部发布版本](https://github.com/L-mimimi/WindowShare/releases)
+
+| 类型 | 文件 | 大小 | 说明 |
+|------|------|------|------|
+| 安装版 | [WindowShare-Setup-1.0.0.exe](https://github.com/L-mimimi/WindowShare/releases/download/v1.0.0/WindowShare-Setup-1.0.0.exe) | 87.9 MB | Inno Setup per-user 安装，**无需管理员权限**；数据写入 `%APPDATA%\WindowShare` |
+| 便携版 | [WindowShare-Portable-1.0.0.zip](https://github.com/L-mimimi/WindowShare/releases/download/v1.0.0/WindowShare-Portable-1.0.0.zip) | 122.2 MB | 解压即用，可放 U 盘；数据全部存于程序目录 `data\` |
+
+两者均为 self-contained（win-x64），目标机器**无需预装 .NET 运行时**。系统要求：Windows 10 1903（10.0.18362）或更高。
+
+校验（SHA256）：
+
+```
+8743fd24553658d3bba5ce60b5ac630b08d7c2a4a5e9d3c232b3d8a0f78430da  WindowShare-Setup-1.0.0.exe
+c75ddcd1e85a0e0ae1e7932880545e86912b40bad7ae911fbe75d7d276f51cf3  WindowShare-Portable-1.0.0.zip
+```
+
 ## 功能一览
 
 | # | 能力 | 实现位置 |
