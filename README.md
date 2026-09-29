@@ -6,21 +6,30 @@ Windows 只读屏幕/窗口共享软件：**Host 端**捕获整个屏幕或指�
 
 ## 下载（Windows x64）
 
-最新版本 **v1.0.0** ｜ [全部发布版本](https://github.com/L-mimimi/WindowShare/releases)
+最新版本 **v1.1.0** ｜ [全部发布版本](https://github.com/L-mimimi/WindowShare/releases)
 
 | 类型 | 文件 | 大小 | 说明 |
 |------|------|------|------|
-| 安装版 | [WindowShare-Setup-1.0.0.exe](https://github.com/L-mimimi/WindowShare/releases/download/v1.0.0/WindowShare-Setup-1.0.0.exe) | 87.9 MB | Inno Setup per-user 安装，**无需管理员权限**；数据写入 `%APPDATA%\WindowShare` |
-| 便携版 | [WindowShare-Portable-1.0.0.zip](https://github.com/L-mimimi/WindowShare/releases/download/v1.0.0/WindowShare-Portable-1.0.0.zip) | 122.2 MB | 解压即用，可放 U 盘；数据全部存于程序目录 `data\` |
+| 安装版 | [WindowShare-Setup-1.1.0.exe](https://github.com/L-mimimi/WindowShare/releases/download/v1.1.0/WindowShare-Setup-1.1.0.exe) | 87.9 MB | Inno Setup per-user 安装，**无需管理员权限**；数据写入 `%APPDATA%\WindowShare` |
+| 便携版 | [WindowShare-Portable-1.1.0.zip](https://github.com/L-mimimi/WindowShare/releases/download/v1.1.0/WindowShare-Portable-1.1.0.zip) | 122.2 MB | 解压即用，可放 U 盘；数据全部存于程序目录 `data\` |
 
 两者均为 self-contained（win-x64），目标机器**无需预装 .NET 运行时**。系统要求：Windows 10 1903（10.0.18362）或更高。
 
 校验（SHA256）：
 
 ```
-8743fd24553658d3bba5ce60b5ac630b08d7c2a4a5e9d3c232b3d8a0f78430da  WindowShare-Setup-1.0.0.exe
-c75ddcd1e85a0e0ae1e7932880545e86912b40bad7ae911fbe75d7d276f51cf3  WindowShare-Portable-1.0.0.zip
+06c1ba5e2f4eea2d4d455d4d63aea40742b5317086431281b1d15df59ee3c629  WindowShare-Setup-1.1.0.exe
+5445206f27c184b8359cef3692904c81f6692907dae7984763543b2507c1bf67  WindowShare-Portable-1.1.0.zip
 ```
+
+## 1.1.0 更新
+
+- **信令服务器连不上不再拖垮共享**：注册信令房间移到「共享已启动」之后，服务器不可达 / 地址写错时只降级为「仅局域网直连」，状态栏给出可照着排查的原因（如 `ConnectionRefused`）并提供「重试」按钮；房间号被占用时自动换号重试，共享不中断，界面同步刷新新房间号与密码。
+- **Viewer 房间号模式真正可用**：连接面板拆成「直连 IP / 房间号」两个互斥输入区，未选中的一侧整体置灰（此前左侧密码框是死 UI，填了也不生效）；房间号模式现在真正走信令接入（LAN 直连优先，失败自动回退 WebRTC）。
+- **分辨率档位提升到 4K**：新增 4K(3840) / 2K(2560)，等比缩放、**不做上采样**（1080p 显示器选 4K 仍输出 1920×1080），主界面每秒显示真实输出尺寸。
+- **帧率分档 24 / 30 / 60 / 90 / 120 / 144**：码率按「分辨率 × 帧率」自动推算并显示；捕获快于目标帧率时按帧间隔丢帧，避免观看端累积延迟。
+- **4K / 高帧率的根因修复**：`Microsoft AVC DX12 Encoder` 默认锁在 H.264 Level 5.0，超出即 `E_INVALIDARG`；现按分辨率×帧率推导并在输出媒体类型上显式下发 `MF_MT_MPEG2_LEVEL`（4K30→5.1、4K60/1080p144→5.2），编码器不接受时回退到不带 level 的配置，硬件编码器全部失败时回退软件 `H264 Encoder MFT`。
+- **观看者接入不再黑屏等待**：关键帧改为按时间触发（超过 2 秒没有 IDR 就强制一个，静态桌面下尤为关键）；解码器开启低延迟模式（`MF_LOW_LATENCY`），不再先攒 28 帧（约 1 秒）才吐出第一帧。
 
 ## 功能一览
 
@@ -84,7 +93,7 @@ powershell -ExecutionPolicy Bypass -File scripts\build.ps1
 ### 2. 局域网使用（无需服务器）
 
 1. 在**被共享的机器**上运行 `WindowShare.Host.exe`
-2. 选择共享源（显示器 / 指定窗口）→ 选画质 → 「开始共享」
+2. 选择共享源（显示器 / 指定窗口）→ 选分辨率（最高 4K）与帧率（24–144）→ 「开始共享」
 3. 屏幕上出现红色悬浮提示条（可拖动、含「⏹ 停止」按钮）；界面显示**房间号**与**临时密码**
 4. 在**观看的机器**上运行 `WindowShare.Viewer.exe`，选择「直连 IP」，填入 Host 的 IP 与密码 → 「连接」
 5. Host 首次会弹出设备审批框（允许并记住 / 仅本次 / 拒绝），批准后即可观看
@@ -104,7 +113,7 @@ dotnet run --project src\WindowShare.Signaling --urls http://0.0.0.0:5000
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\build.ps1 -Package
-# 产出：installer\output\WindowShare-Setup-1.0.0.exe
+# 产出：installer\output\WindowShare-Setup-1.1.0.exe
 ```
 
 需要 Inno Setup 6/7（`winget install JRSoftware.InnoSetup`）；未安装时脚本会自动通过
@@ -114,7 +123,7 @@ NuGet 包 `Tools.InnoSetup` 获取编译器，无需手工安装。安装包为 
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\build.ps1 -Portable
-# 产出：dist\portable\WindowShare-Portable-1.0.0.zip（含目录版）
+# 产出：dist\portable\WindowShare-Portable-1.1.0.zip（含目录版）
 ```
 
 解压后直接双击 `启动-共享端.bat` / `启动-观看端.bat` 即可，**无需安装、无需 .NET 运行时**。
@@ -128,7 +137,7 @@ powershell -ExecutionPolicy Bypass -File scripts\build.ps1 -Portable
 | 界面提示 | Host 界面右上角显示「便携模式/安装模式」，📁 按钮直达数据目录 |
 
 ```
-WindowShare-Portable-1.0.0/
+WindowShare-Portable-1.1.0/
 ├── WindowShare.Host.exe        共享端
 ├── WindowShare.Viewer.exe      观看端
 ├── data\                       便携数据（logs / config / recordings）

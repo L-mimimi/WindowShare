@@ -14,8 +14,10 @@ dotnet test
 | `SecurityTests` | 房间号/密码字符集与长度、随机性、PBKDF2 确定性与盐相关性、常量时间比较、HMAC 确定性 |
 | `StatsCollectorTests` | 码率/帧率计算、延迟 EWMA 收敛、无样本时 NaN |
 | `CongestionControllerTests` | 健康时维持、高 RTT 降码率、连续降档后降分辨率、最低档保护、高丢帧率触发降档、最小评估间隔、恢复不超初始值 |
+| `AppPathsTests` | 便携/安装模式数据目录决策、只读位置回退 `%APPDATA%`、环境变量优先级、设备 ID 稳定性 |
+| `VideoFormatPlannerTests` | 帧率档位、4K 上限、等比缩放取偶且不上采样、码率推算边界与单调性、`SuggestH264Level` 各档位、Level 展示名 |
 
-期望结果：**20/20 通过**。
+期望结果：**82/82 通过**。
 
 ## 2. 冒烟测试（真实捕获本机屏幕）
 
@@ -27,12 +29,13 @@ dotnet run --project tools/WindowShare.SmokeTest
 
 | 部分 | 内容 | 通过标准 |
 |------|------|----------|
-| Part1 | 探测捕获引擎、捕获源、编码器清单 | 至少一种捕获引擎可用；列出显示器与窗口 |
+| Part1 | 探测捕获引擎、捕获源、编码器清单，并逐档验证「分辨率 × 帧率」可配置（日志带推导出的 H.264 Level 与编码器实际接受的 Level） | 至少一种捕获引擎可用；720p30 / 1080p30 / 1080p60 / 1080p144 / 2K30 / 4K30 / 4K60 各档均可用 |
 | Part2 | 合成运动图像 → GPU NV12 → H.264 → 文件 | ≥45 帧、≥30KB、含 SPS/PPS |
+| Part2b | 4K（3840×2160@30）与高帧率（1280×720@120）编码 | 4K 输出分辨率正确且码流能解回 3840×2160（解码帧数 ≥ 编码帧数的 80%）；120fps 档实际编码帧率不超过目标的 135%（帧率节流生效） |
 | Part3 | 真实捕获主显示器（WGC + GDI 双引擎） | 至少一个引擎出帧并编码成功 |
-| Part4 | 回环端到端：ShareSession + LAN 服务器 → 客户端 + 解码器 | 连接成功、加密启用、收帧 >60、解码 >30 |
+| Part4 | 回环端到端：ShareSession + LAN 服务器 → 客户端 + 解码器（GDI 定速捕获） | 连接成功、加密启用、收帧 ≥40、解码帧数 ≥ 首个 IDR 后可解码帧数的 90% |
 | Part5 | 信令服务器回环（含错误密码负向用例） | 错误密码被拒、审批通过、取到 LAN 端点 |
-| Part6 | WebRTC 回环（DTLS-SRTP + H.264 RTP） | 连接成功、收帧 >30、解码 >20 |
+| Part6 | WebRTC 回环（DTLS-SRTP + H.264 RTP，GDI 定速捕获） | 连接成功、收帧 ≥30、解码帧数 ≥ 投喂帧数的 90% |
 
 产物：`%APPDATA%\WindowShare\recordings\smoke-*.h264`，可用 ffprobe 验证：
 
@@ -42,6 +45,9 @@ ffprobe -f h264 "$env:APPDATA\WindowShare\recordings\smoke-synthetic.h264"
 
 > 注意：Part3 的 WGC 在桌面完全静止时可能不产生新帧（屏幕内容无变化时不推送），
 > 这是 Windows Graphics Capture 的正常行为；测试会用 GDI 引擎兜底验证编码链路。
+
+> Part4 / Part6 显式指定 `CaptureEnginePreference.Gdi`（定速轮询，出帧节奏与屏幕内容无关），
+> 避免静态桌面下 WGC 只出约 8fps 导致比例断言抖动；断言均为比例式而非绝对帧数。
 
 ## 3. Host 自动验证（无 UI）
 
@@ -119,7 +125,7 @@ dotnet run --project src\WindowShare.Host -- --autotest
 powershell -ExecutionPolicy Bypass -File scripts\build.ps1 -Package
 ```
 
-- [ ] `installer\output\WindowShare-Setup-1.0.0.exe` 生成
+- [ ] `installer\output\WindowShare-Setup-1.1.0.exe` 生成
 - [ ] 双击安装（无需管理员权限），开始菜单出现 Host / Viewer 快捷方式
 - [ ] 从开始菜单启动 Host，功能与开发构建一致
 - [ ] 卸载后 `%APPDATA%\WindowShare`（白名单/设置）保留，程序目录被清理

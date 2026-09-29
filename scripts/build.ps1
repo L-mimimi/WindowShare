@@ -31,7 +31,7 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
-$version = "1.0.0"
+$version = "1.1.0"
 
 # ---------- 定位 dotnet（必须带 SDK，优先 PATH，其次用户级安装目录） ----------
 function Test-DotnetSdk([string]$exe) {
@@ -62,7 +62,7 @@ Write-Host "==== WindowShare 构建 ====" -ForegroundColor Cyan
 
 # ---------- 1/5 构建 ----------
 Write-Host "[1/5] dotnet build ..." -ForegroundColor Yellow
-& $dotnet build -c Release
+& $dotnet build -c Release -m:1
 if ($LASTEXITCODE -ne 0) { throw "构建失败" }
 
 # ---------- 2/5 单元测试 ----------
@@ -71,7 +71,7 @@ if ($SkipTests) {
 }
 else {
     Write-Host "[2/5] dotnet test ..." -ForegroundColor Yellow
-    & $dotnet test -c Release --no-build
+    & $dotnet test -c Release --no-build -m:1
     if ($LASTEXITCODE -ne 0) { throw "单元测试失败" }
 }
 
@@ -82,10 +82,10 @@ if (Test-Path $pubRoot) { Remove-Item $pubRoot -Recurse -Force }
 
 $projects = @("src/WindowShare.Host", "src/WindowShare.Viewer")
 foreach ($p in $projects) {
-    & $dotnet publish $p -c Release -r win-x64 --self-contained true -o $pubRoot /p:PublishSingleFile=false
+    & $dotnet publish $p -c Release -r win-x64 --self-contained true -o $pubRoot /p:PublishSingleFile=false -m:1
     if ($LASTEXITCODE -ne 0) { throw "发布失败: $p" }
 }
-& $dotnet publish "src/WindowShare.Signaling" -c Release -r win-x64 --self-contained true -o "$pubRoot\signaling" /p:PublishSingleFile=false
+& $dotnet publish "src/WindowShare.Signaling" -c Release -r win-x64 --self-contained true -o "$pubRoot\signaling" /p:PublishSingleFile=false -m:1
 if ($LASTEXITCODE -ne 0) { throw "发布失败: src/WindowShare.Signaling" }
 Write-Host "发布输出: $pubRoot"
 
