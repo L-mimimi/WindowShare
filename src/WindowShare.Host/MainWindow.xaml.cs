@@ -120,12 +120,25 @@ public partial class MainWindow : Window
         if (session is not { IsSharing: true })
         {
             TxtOutput.Text = "";
+            TxtAudio.Text = "";
             return;
         }
         var (width, height) = session.OutputSize;
         TxtOutput.Text = width > 0
             ? $"输出 {width}×{height}@{session.Options?.Fps ?? 0}fps"
             : "";
+        TxtAudio.Text = DescribeAudio(session);
+    }
+
+    /// <summary>系统声音共享状态（含实时电平，一眼看出「有没有声音在传」）</summary>
+    private static string DescribeAudio(ShareSession session)
+    {
+        var audio = session.AudioInfo;
+        if (audio.Enabled)
+            return $"声音 OK {audio.SampleRate / 1000}kHz/{audio.Channels}ch 电平 {session.AudioLevel:P0}";
+        return session.Options?.ShareAudio == true
+            ? "声音 启动失败（详见日志）"
+            : "声音 未共享";
     }
 
     /// <summary>显示运行模式（便携/安装）与数据目录</summary>
@@ -217,6 +230,7 @@ public partial class MainWindow : Window
             BitrateBps = VideoFormatPlanner.SuggestBitrateBps(plannedWidth, plannedHeight, fps),
             RecordForValidation = ChkRecord.IsChecked == true,
             RecordFilePath = Path.Combine(AppPaths.Recordings, $"share-{DateTime.Now:yyyyMMdd-HHmmss}.h264"),
+            ShareAudio = ChkAudio.IsChecked == true,
         };
 
         _session = new ShareSession();
@@ -254,6 +268,8 @@ public partial class MainWindow : Window
         BtnToggleShare.Background = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0xE5, 0x39, 0x35));
         BtnStop.Visibility = Visibility.Visible;
         TxtPreviewHint.Visibility = Visibility.Collapsed;
+        // 音频参数在会话启动时就固定了，共享期间改勾选没有意义，直接禁掉避免误解
+        ChkAudio.IsEnabled = false;
         _infoTimer.Start();
         RefreshOutputInfo();
 
@@ -565,6 +581,8 @@ public partial class MainWindow : Window
             TxtEncoder.Text = "编码器：未启动";
             TxtStats.Text = "观看者：0";
             TxtOutput.Text = "";
+            TxtAudio.Text = "";
+            ChkAudio.IsEnabled = true;
             SetSignalingState(ChkSignaling.IsChecked == true ? "将在开始共享时连接" : "未启用",
                 SignalingUiState.Off);
         });

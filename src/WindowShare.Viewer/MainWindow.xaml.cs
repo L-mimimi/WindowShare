@@ -1,7 +1,9 @@
+using System.Collections.Concurrent;
 using System.Windows;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
+using WindowShare.Core.Audio;
 using WindowShare.Core.Decoding;
 using WindowShare.Core.Logging;
 
@@ -29,6 +31,12 @@ public partial class MainWindow : Window
     private WriteableBitmap? _bitmap;
     private double _lastRttMs = double.NaN;
     private volatile bool _firstKeyframeSeen;
+    /// <summary>系统声音播放管线（解码 + 抖动缓冲 + 渲染 + 音画同步主时钟）</summary>
+    private AudioPlaybackPipeline? _audio;
+    /// <summary>待上屏的解码帧队列（音画同步需要「等到点再上屏」，不能在解码回调里直接画）</summary>
+    private readonly BlockingCollection<DecodedVideoFrame> _presentQueue = new(16);
+    private Thread? _presentThread;
+    private CancellationTokenSource? _presentCts;
 
     public MainWindow()
     {
@@ -151,6 +159,7 @@ public partial class MainWindow : Window
         _firstKeyframeSeen = false;
         _decoder = new MfH264Decoder();
         _decoder.Decoded += OnDecodedFrame;
+        StartPresentThread();
 
         BtnConnect.IsEnabled = false;
         BtnDisconnect.IsEnabled = true;
@@ -315,6 +324,7 @@ public partial class MainWindow : Window
     {
         client.StateChanged += OnStateChanged;
         client.FrameReceived += OnFrameReceived;
+        client.AudioFrameReceived += OnAudioFrameReceived;
         client.RttUpdated += rtt => _lastRttMs = rtt;
         client.StatsUpdated += s => Dispatcher.BeginInvoke(() =>
             TxtEncoder.Text = $"编码器：{s.EncoderName}{(s.Hardware ? "(硬)" : "(软)")} · 源:{s.SourceTitle}");
@@ -332,6 +342,7 @@ public partial class MainWindow : Window
         if (_client != null)
         {
             _client.FrameReceived -= OnFrameReceived;
+            _client.AudioFrameReceived -= OnAudioFrameReceived;
             _client.StateChanged -= OnStateChanged;
             _client.Stop("用户断开");
             _client.Dispose();
@@ -341,6 +352,8 @@ public partial class MainWindow : Window
         _signaling = null;
         if (signaling != null) _ = signaling.DisposeAsync();
         TeardownVideoOnly();
+        StopAudio();
+        StopPresentThread();
         if (_decoder != null)
         {
             _decoder.Decoded -= OnDecodedFrame;
@@ -373,28 +386,16 @@ public partial class MainWindow : Window
         }
     }
 
-    /// <summary>解码线程：BGRA → 位图</summary>
+    /// <summary>解码线程：BGRA → 上屏队列（何时真正上屏由 PresentLoop 按音频时钟决定）</summary>
     private void OnDecodedFrame(DecodedVideoFrame frame)
     {
         _stats.OnFrame(0); // 帧率样本（字节数已在收包时计入）
-        Dispatcher.BeginInvoke(() =>
+        if (_presentQueue.IsAddingCompleted) return;
+        if (!_presentQueue.TryAdd(frame))
         {
-            try
-            {
-                if (_bitmap == null || _bitmap.PixelWidth != frame.Width || _bitmap.PixelHeight != frame.Height)
-                {
-                    _bitmap = new WriteableBitmap(frame.Width, frame.Height, 96, 96, PixelFormats.Bgra32, null);
-                    VideoImage.Source = _bitmap;
-                    TxtResolution.Text = $"分辨率：{frame.Width}×{frame.Height}";
-                }
-                _bitmap.WritePixels(new System.Windows.Int32Rect(0, 0, frame.Width, frame.Height),
-                    frame.Bgra, frame.Width * 4, 0);
-            }
-            catch (Exception ex)
-            {
-                Logger.Warn("Viewer", "渲染异常: " + ex.Message);
-            }
-        });
+            // 队列满（上屏线程可能正卡在同步等待里）：丢最旧的一帧保住实时性
+            if (_presentQueue.TryTake(out _)) _presentQueue.TryAdd(frame);
+        }
     }
 
     /// <summary>状态变化</summary>
@@ -417,6 +418,7 @@ public partial class MainWindow : Window
             {
                 TxtTransport.Text = "传输：LAN TCP 直连";
                 TxtEncrypt.Text = _client?.IsEncrypted == true ? "加密：AES-256-GCM ✓" : "加密：未启用";
+                TryStartAudio();
             }
         });
     }
@@ -430,6 +432,7 @@ public partial class MainWindow : Window
         TxtFps.Text = $"帧率：{fps:F1} fps";
         if (!double.IsNaN(_lastRttMs))
             TxtLatency.Text = $"延迟：≈{_lastRttMs / 2:F0} ms（网络单向）";
+        RefreshAudioStatus();
     }
 
     /// <summary>切换连接模式：只启用当前模式的输入区，避免往不生效的框里输入</summary>
@@ -455,6 +458,166 @@ public partial class MainWindow : Window
         // 摘要级日志走状态栏即可，避免弹窗刷屏
         if (level >= LogLevel.Error)
             Dispatcher.BeginInvoke(() => TxtState.Text = $"状态：{message}");
+    }
+
+    // ===== 系统声音播放 + 音画同步 =====
+
+    /// <summary>
+    /// 起播系统声音。Host 没共享声音、或本机没有播放设备/没有 AAC 解码器时，
+    /// 一律静默降级为「只看画面」，不弹窗打断观看。
+    /// </summary>
+    private void TryStartAudio()
+    {
+        var client = _client;
+        if (client == null || !client.Audio.Enabled) { UpdateAudioStatus(); return; }
+        if (ChkAudioPlay.IsChecked != true) { UpdateAudioStatus(); return; }
+        if (_audio != null) { UpdateAudioStatus(); return; }
+
+        try
+        {
+            var pipeline = new AudioPlaybackPipeline(client.Audio.SampleRate);
+            pipeline.Start();
+            _audio = pipeline;
+            Logger.Info("Viewer",
+                $"系统声音播放已启动: {pipeline.DecoderName}, " +
+                $"{client.Audio.SampleRate}Hz/{client.Audio.Channels}ch {client.Audio.Codec}");
+        }
+        catch (Exception ex)
+        {
+            _audio = null;
+            Logger.Warn("Viewer", $"音频播放启动失败，本次只看画面: {ex.Message}");
+        }
+        UpdateAudioStatus();
+    }
+
+    /// <summary>停止声音播放（取消勾选 / 断开连接）。同时清空同步时钟，视频退回「解码完立即上屏」。</summary>
+    private void StopAudio()
+    {
+        var audio = _audio;
+        _audio = null;
+        if (audio != null)
+        {
+            audio.Clock.Reset();
+            try { audio.Dispose(); } catch { }
+        }
+        UpdateAudioStatus();
+    }
+
+    private void OnAudioFrameReceived(EncodedAudioFrame frame) => _audio?.Feed(frame);
+
+    /// <summary>勾选框：随时静音/恢复。取消勾选会一并解除音画同步等待，画面延迟更低。</summary>
+    private void ChkAudioPlay_Changed(object sender, RoutedEventArgs e)
+    {
+        if (!IsLoaded) return;
+        if (ChkAudioPlay.IsChecked == true) TryStartAudio();
+        else StopAudio();
+    }
+
+    private void UpdateAudioStatus() => Dispatcher.BeginInvoke(RefreshAudioStatus);
+
+    /// <summary>状态栏的声音一栏（必须在 UI 线程调用）</summary>
+    private void RefreshAudioStatus()
+    {
+        if (TxtAudio == null) return;
+        var audio = _audio;
+        if (_client?.Audio.Enabled != true)
+        {
+            TxtAudio.Text = "声音：Host 未共享";
+            TxtAudio.ToolTip = "Host 端勾选「共享系统声音」后重新开始共享，这里才会有声音";
+            return;
+        }
+        if (audio == null)
+        {
+            TxtAudio.Text = ChkAudioPlay.IsChecked == true ? "声音：不可用" : "声音：已静音";
+            TxtAudio.ToolTip = ChkAudioPlay.IsChecked == true
+                ? "本机没有可用的播放设备或 AAC 解码器（详见日志）"
+                : "勾选「播放系统声音」即可恢复";
+            return;
+        }
+
+        TxtAudio.Text = $"声音：{(audio.IsPlaying ? "播放中" : "缓冲中")} {audio.BufferedMs}ms" +
+                        (audio.Underruns > 0 ? $" 卡顿{audio.Underruns}" : "");
+        TxtAudio.ToolTip =
+            $"解码器：{audio.DecoderName}\n" +
+            $"抖动缓冲目标：{AudioRenderer.DefaultTargetLatencyMs}ms（当前 {audio.BufferedMs}ms）\n" +
+            $"已收 {audio.ReceivedFrames} 帧 / {audio.ReceivedBytes / 1024} KB，解码失败 {audio.DroppedFrames}\n" +
+            $"缓冲耗尽 {audio.Underruns} 次\n" +
+            "视频以音频播放时钟为主时钟对齐上屏；取消勾选「播放系统声音」则画面不再等待，延迟更低";
+    }
+
+    /// <summary>
+    /// 视频上屏线程。
+    /// 音画同步要求「画面早于声音时等一会儿再画」，解码回调里直接 Dispatcher.BeginInvoke
+    /// 做不到——那样画面会永远比声音早一个抖动缓冲的时长。所以解码回调只入队，
+    /// 由本线程按音频时钟决定何时上屏。没有音频时时钟为 null，立即上屏（旧行为）。
+    /// </summary>
+    private void StartPresentThread()
+    {
+        if (_presentThread != null) return;
+        _presentCts = new CancellationTokenSource();
+        var ct = _presentCts.Token;
+        _presentThread = new Thread(() => PresentLoop(ct)) { IsBackground = true, Name = "VideoPresent" };
+        _presentThread.Start();
+    }
+
+    private void StopPresentThread()
+    {
+        try { _presentCts?.Cancel(); } catch { }
+        var thread = _presentThread;
+        _presentThread = null;
+        if (thread != null && thread.IsAlive)
+        {
+            try { thread.Join(500); } catch { }
+        }
+        _presentCts?.Dispose();
+        _presentCts = null;
+        while (_presentQueue.TryTake(out _)) { }
+    }
+
+    private void PresentLoop(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            DecodedVideoFrame frame;
+            try { frame = _presentQueue.Take(ct); }
+            catch (OperationCanceledException) { break; }
+            catch (InvalidOperationException) { break; }
+
+            var clock = _audio?.Clock;
+            while (clock != null && !ct.IsCancellationRequested &&
+                   AvSyncClock.Decide(frame.TimestampUtc, clock.GetAudioUtcTicks()) == VideoPresentDecision.Wait)
+            {
+                // 等待期间来了更新的帧就直接跳到最新帧：屏幕共享看最新画面比看全每一帧重要，
+                // 顺带还能把积压的延迟追平
+                if (_presentQueue.TryTake(out var newer)) { frame = newer; continue; }
+                Thread.Sleep(2);
+            }
+            if (ct.IsCancellationRequested) break;
+            RenderFrame(frame);
+        }
+    }
+
+    /// <summary>BGRA → WriteableBitmap（必须在 UI 线程）</summary>
+    private void RenderFrame(DecodedVideoFrame frame)
+    {
+        Dispatcher.BeginInvoke(() =>
+        {
+            try
+            {
+                if (_bitmap == null || _bitmap.PixelWidth != frame.Width || _bitmap.PixelHeight != frame.Height)
+                {
+                    _bitmap = new WriteableBitmap(frame.Width, frame.Height, 96, 96, PixelFormats.Bgra32, null);
+                    VideoImage.Source = _bitmap;
+                    TxtResolution.Text = $"分辨率：{frame.Width}×{frame.Height}";
+                }
+                _bitmap.WritePixels(new System.Windows.Int32Rect(0, 0, frame.Width, frame.Height),
+                    frame.Bgra, frame.Width * 4, 0);
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn("Viewer", "渲染异常: " + ex.Message);
+            }
+        });
     }
 
     private void Window_Closing(object sender, System.ComponentModel.CancelEventArgs e)

@@ -48,6 +48,10 @@
                             Background="#1E88E5" Foreground="White" Click="BtnConnect_Click" IsDefault="True"/>
                     <Button DockPanel.Dock="Left" x:Name="BtnDisconnect" Content="断开" Width="80" Margin="8,0,0,0"
                             Click="BtnDisconnect_Click" IsEnabled="False"/>
+                    <CheckBox DockPanel.Dock="Left" x:Name="ChkAudioPlay" Content="播放系统声音" IsChecked="True"
+                              VerticalAlignment="Center" Margin="16,0,0,0"
+                              Checked="ChkAudioPlay_Changed" Unchecked="ChkAudioPlay_Changed"
+                              ToolTip="Host 端勾选了「共享系统声音」时才有声音可播。&#10;取消勾选即临时静音：此时画面不再等待音频时钟，延迟更低。"/>
                     <TextBlock DockPanel.Dock="Left" x:Name="TxtModeHint" VerticalAlignment="Center"
                                Margin="16,0,0,0" Foreground="#888"/>
                 </DockPanel>
@@ -73,6 +77,7 @@
                 <TextBlock x:Name="TxtLatency" Text="延迟：-" Margin="0,0,18,0"/>
                 <TextBlock x:Name="TxtResolution" Text="分辨率：-" Margin="0,0,18,0"/>
                 <TextBlock x:Name="TxtEncoder" Text="编码器：-" Margin="0,0,18,0"/>
+                <TextBlock x:Name="TxtAudio" Text="声音：-" Margin="0,0,18,0"/>
                 <TextBlock x:Name="TxtEncrypt" Text="加密：-"/>
                 <TextBlock x:Name="TxtMode" Text="" Margin="18,0,0,0" Foreground="#1E88E5"/>
             </StackPanel>
