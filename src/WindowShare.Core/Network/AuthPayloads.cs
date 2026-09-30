@@ -43,6 +43,18 @@ public sealed record AuthResultPayload
     [JsonPropertyName("encoder")] public string EncoderName { get; init; } = "";
     [JsonPropertyName("width")] public int Width { get; init; }
     [JsonPropertyName("height")] public int Height { get; init; }
+
+    // ===== 系统声音（1.2.0 起；老版本 Host 不带这些字段，Viewer 按「无音频」处理）=====
+    /// <summary>本次会话是否共享系统声音</summary>
+    [JsonPropertyName("audio")] public bool AudioEnabled { get; init; }
+    /// <summary>音频采样率（固定 48000）</summary>
+    [JsonPropertyName("audioRate")] public int AudioSampleRate { get; init; }
+    /// <summary>音频声道数（固定 2）</summary>
+    [JsonPropertyName("audioCh")] public int AudioChannels { get; init; }
+    /// <summary>音频编码标识（"aac-adts"）</summary>
+    [JsonPropertyName("audioCodec")] public string AudioCodec { get; init; } = "";
+    /// <summary>音频编码器名（诊断显示用；与视频编码器名是两回事，不要混用）</summary>
+    [JsonPropertyName("audioEnc")] public string AudioEncoderName { get; init; } = "";
 }
 
 /// <summary>双向：周期统计（Host→Viewer：编码器信息；Viewer→Host：RTT 反馈）</summary>

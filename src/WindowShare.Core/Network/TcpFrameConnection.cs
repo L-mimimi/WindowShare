@@ -54,7 +54,7 @@ public sealed class TcpFrameConnection : IDisposable
     {
         var enc = _encryption;
         byte[] buffer;
-        if (enc != null && (type == MessageType.VideoFrame || type == MessageType.StatsInfo))
+        if (enc != null && ShouldEncrypt(type))
         {
             var cipher = enc.Encrypt(payload.Span);
             var seq = Interlocked.Increment(ref _sendSeq);
@@ -81,11 +81,18 @@ public sealed class TcpFrameConnection : IDisposable
         }
     }
 
-    /// <summary>同步发送（认证握手阶段用，简单可靠）</summary>
-    public void Send(MessageType type, FrameFlags flags, ReadOnlySpan<byte> payload)
+    /// <summary>同步发送（时间戳取发送时刻）</summary>
+    public void Send(MessageType type, FrameFlags flags, ReadOnlySpan<byte> payload) =>
+        Send(type, flags, DateTime.UtcNow.Ticks, payload);
+
+    /// <summary>
+    /// 同步发送并显式指定帧头时间戳（自动加密）。
+    /// 音画同步要的是「采集时刻」，而默认的发送时刻中间隔着编码与队列等待（几十毫秒起），
+    /// 音频帧必须把采集时间戳原样带过去，观看端才对得齐。
+    /// </summary>
+    public void Send(MessageType type, FrameFlags flags, long timestampUtc, ReadOnlySpan<byte> payload)
     {
-        var seq = Interlocked.Increment(ref _sendSeq);
-        var buffer = FrameHeader.BuildFrame(type, flags, seq, DateTime.UtcNow.Ticks, payload);
+        var buffer = BuildFrame(type, flags, timestampUtc, payload);
         _sendLock.Wait();
         try
         {
@@ -97,6 +104,32 @@ public sealed class TcpFrameConnection : IDisposable
             _sendLock.Release();
         }
     }
+
+    /// <summary>
+    /// 组装待发帧：媒体与统计类消息在会话密钥可用时一律加密。
+    /// 认证握手（AuthRequest/AuthChallenge/AuthProof/AuthResult）必须保持明文——
+    /// 密钥本身就是在握手过程中协商出来的；Ping/Pong/Bye 不含内容，也走明文。
+    /// </summary>
+    private byte[] BuildFrame(MessageType type, FrameFlags flags, long timestampUtc, ReadOnlySpan<byte> payload)
+    {
+        var seq = Interlocked.Increment(ref _sendSeq);
+        var enc = _encryption;
+        if (enc != null && ShouldEncrypt(type))
+        {
+            var cipher = enc.Encrypt(payload);
+            var buffer = new byte[FrameHeader.HeaderSize + cipher.Length];
+            new FrameHeader(type, flags | FrameFlags.Encrypted, seq, timestampUtc, cipher.Length).Write(buffer);
+            cipher.CopyTo(buffer.AsSpan(FrameHeader.HeaderSize));
+            return buffer;
+        }
+        return FrameHeader.BuildFrame(type, flags, seq, timestampUtc, payload);
+    }
+
+    /// <summary>该类型的负载是否应当加密（内容类消息）</summary>
+    private static bool ShouldEncrypt(MessageType type) => type is MessageType.VideoFrame
+        or MessageType.AudioFrame
+        or MessageType.RawFrame
+        or MessageType.StatsInfo;
 
     /// <summary>读一帧（同步，阻塞；用于认证握手）</summary>
     public (FrameHeader Header, byte[] Payload)? ReadFrame()

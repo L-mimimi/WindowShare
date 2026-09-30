@@ -35,6 +35,12 @@ public enum MessageType : byte
     VideoFrame = 20,
     /// <summary>原始视频帧（未编码，用于测试通路；BGRA 像素）</summary>
     RawFrame = 21,
+    /// <summary>
+    /// 系统声音帧（ADTS 封装的 AAC-LC，48kHz/立体声/128kbps）。
+    /// 帧头的 TimestampUtc 是该帧第一个采样点的采集时刻，Viewer 以此对齐音画。
+    /// 仍然是只读共享：音频只有 Host → Viewer 一个方向，不存在回传。
+    /// </summary>
+    AudioFrame = 22,
 }
 
 /// <summary>帧头标志位</summary>
