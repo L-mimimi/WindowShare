@@ -1,3 +1,4 @@
+using WindowShare.Core.Audio;
 using WindowShare.Core.Capture;
 using WindowShare.Core.Decoding;
 using WindowShare.Core.Encoding;
@@ -18,6 +19,9 @@ namespace WindowShare.SmokeTest;
 ///   Part2 编码验证：合成运动图像 → BGRA→NV12(GPU) → H.264 → 写入文件
 ///   Part3 捕获验证：真实捕获主显示器并编码（WGC + GDI 双引擎）
 ///   Part4 回环端到端：ShareSession + LAN 服务器 → LanShareClient + 解码器 → 解码出画面
+///   Part5 信令回环：信令服务器子进程 → Host 注册房间 → Viewer 加入（含错误密码负向用例）
+///   Part6 WebRTC 回环：SIPSorcery 双 PeerConnection 本地互通
+///   Part7 系统声音：AAC 编解码往返 / LAN 音频端到端 / WASAPI loopback 探测
 /// 输出文件位于 %APPDATA%\WindowShare\recordings\，可被 ffprobe/播放器验证。
 /// 退出码 0 = 全部通过。
 /// </summary>
@@ -39,12 +43,14 @@ public static class Program
             var ok4 = RunPart("Part4", Part4LoopbackE2E);
             var ok5 = RunPart("Part5", Part5Signaling);
             var ok6 = RunPart("Part6", Part6WebRtcLoopback);
+            var ok7 = RunPart("Part7", Part7Audio);
             Logger.Info("SmokeTest",
                 $"===== 结果: 合成编码={(ok2 ? "PASS" : "FAIL")}, " +
                 $"4K/高帧率={(ok2b ? "PASS" : "FAIL")}, " +
                 $"真实捕获={(ok3 ? "PASS" : "FAIL")}, 回环端到端={(ok4 ? "PASS" : "FAIL")}, " +
-                $"信令={(ok5 ? "PASS" : "FAIL")}, WebRTC={(ok6 ? "PASS" : "FAIL")} =====");
-            return ok2 && ok2b && ok3 && ok4 && ok5 && ok6 ? 0 : 1;
+                $"信令={(ok5 ? "PASS" : "FAIL")}, WebRTC={(ok6 ? "PASS" : "FAIL")}, " +
+                $"系统声音={(ok7 ? "PASS" : "FAIL")} =====");
+            return ok2 && ok2b && ok3 && ok4 && ok5 && ok6 && ok7 ? 0 : 1;
         }
         catch (Exception ex)
         {
@@ -783,4 +789,337 @@ public static class Program
         return pass;
     }
 
+    /// <summary>
+    /// Part7 系统声音共享（WASAPI loopback 采集「默认播放设备正在播的内容」，不是麦克风）：
+    ///   7a AAC 编解码往返：合成 440Hz(左)/880Hz(右) → ADTS → 解码回读，校验自描述头、时间戳与声道分离
+    ///   7b LAN 端到端：ShareSession(ShareAudio) → LanShareServer → LanShareClient → 解码
+    ///   7c loopback 采集软性探测：没有播放设备的机器上只告警，不判失败
+    /// </summary>
+    private static bool Part7Audio()
+    {
+        Logger.Info("Part7", "---- 系统声音共享验证 ----");
+        var ok7a = RunPart("Part7a", Part7aAudioCodecRoundTrip);
+        var ok7b = RunPart("Part7b", Part7bLanAudioE2E);
+        RunPart("Part7c", Part7cLoopbackProbe);   // 软性探测：结果不计入 Part7 通过条件
+        Logger.Info("Part7",
+            $"Part7 结果: 编解码往返={(ok7a ? "PASS" : "FAIL")}, LAN 端到端={(ok7b ? "PASS" : "FAIL")}");
+        return ok7a && ok7b;
+    }
+
+    /// <summary>7a：合成正弦波走一遍 AAC 编码 → ADTS → 解码，验证声音链路本身是通的</summary>
+    private static bool Part7aAudioCodecRoundTrip()
+    {
+        var found = MfAacEncoder.ProbeEncoders();
+        Logger.Info("Part7a", $"AAC 编码器: {(found.Count == 0 ? "未找到" : string.Join(", ", found))}");
+        if (found.Count == 0)
+        {
+            Logger.Error("Part7a", "系统上没有 AAC 编码器 MFT，无法共享系统声音");
+            return false;
+        }
+
+        const double seconds = 2.0, leftHz = 440.0, rightHz = 880.0, amplitude = 0.30;
+        const int channels = AudioStreamInfo.Channels;
+        var chunkFrames = AudioStreamInfo.ChunkFrames;               // 960 = 20ms，与真实采集同块长
+        var inputFrames = (int)(AudioStreamInfo.SampleRate * seconds);
+
+        var encoded = new List<EncodedAudioFrame>();
+        var decodedChunks = new List<DecodedAudioChunk>();
+        var baseTicks = DateTime.UtcNow.Ticks;
+
+        using var encoder = new MfAacEncoder();
+        using var decoder = new MfAacDecoder();
+        encoder.Encoded += f => { lock (encoded) encoded.Add(f); };
+        decoder.Decoded += c => { lock (decodedChunks) decodedChunks.Add(c); };
+
+        var pcm = new short[chunkFrames * channels];
+        for (var done = 0; done < inputFrames; done += chunkFrames)
+        {
+            var frames = Math.Min(chunkFrames, inputFrames - done);
+            for (var i = 0; i < frames; i++)
+            {
+                var n = done + i;
+                pcm[i * channels] = (short)(short.MaxValue * amplitude *
+                    Math.Sin(2 * Math.PI * leftHz * n / AudioStreamInfo.SampleRate));
+                pcm[i * channels + 1] = (short)(short.MaxValue * amplitude *
+                    Math.Sin(2 * Math.PI * rightHz * n / AudioStreamInfo.SampleRate));
+            }
+            encoder.Encode(pcm, frames,
+                baseTicks + (long)done * TimeSpan.TicksPerSecond / AudioStreamInfo.SampleRate);
+        }
+        var flushed = encoder.Drain();   // 不冲刷会丢掉 AAC priming 之后的结尾（听感是「最后一句被截断」）
+
+        EncodedAudioFrame[] sent;
+        lock (encoded) sent = encoded.ToArray();
+        if (sent.Length == 0)
+        {
+            Logger.Error("Part7a", "编码器没有输出任何 AAC 帧");
+            return false;
+        }
+
+        // ADTS 头必须自描述：Viewer 只靠码流本身就能建解码器，帧头里没有额外带外信息
+        var badHeader = 0;
+        var encodedBytes = 0;
+        foreach (var f in sent)
+        {
+            encodedBytes += f.Data.Length;
+            if (!Adts.TryReadHeader(f.Data, out var frameLength, out var sr, out var ch)
+                || frameLength != f.Data.Length
+                || sr != AudioStreamInfo.SampleRate
+                || ch != channels)
+                badHeader++;
+        }
+
+        // 时间戳必须严格递增：音画同步全靠它排序与对齐
+        var tsMonotonic = true;
+        for (var i = 1; i < sent.Length; i++)
+            if (sent[i].TimestampUtc <= sent[i - 1].TimestampUtc) { tsMonotonic = false; break; }
+
+        foreach (var f in sent) decoder.Decode(f.Data, f.TimestampUtc);
+
+        DecodedAudioChunk[] got;
+        lock (decodedChunks) got = decodedChunks.ToArray();
+        var wrongFormat = got.Count(c => c.SampleRate != AudioStreamInfo.SampleRate || c.Channels != channels);
+        var decodedSamples = got.Sum(c => c.Frames);
+        var pcmOut = new short[decodedSamples * channels];
+        var write = 0;
+        foreach (var c in got)
+        {
+            var copy = Math.Min(c.Data.Length, pcmOut.Length - write);
+            if (copy <= 0) break;
+            Array.Copy(c.Data, 0, pcmOut, write, copy);
+            write += copy;
+        }
+        var outFrames = write / channels;
+
+        // 声道分离：左 440Hz / 右 880Hz，符号翻转次数比应接近 1:2。
+        // 这条能抓住声道交换、被下混成单声道、重采样系数写错三类回归。
+        var (crossLeft, crossRight) = ZeroCrossings(pcmOut, outFrames, channels);
+        var crossRatio = crossRight == 0 ? double.NaN : (double)crossLeft / crossRight;
+        var level = PcmConvert.RmsLevel(pcmOut);
+
+        Logger.Info("Part7a",
+            $"编码器={encoder.EncoderName}, {encoder.SampleRate}Hz/{encoder.Channels}ch, " +
+            $"目标 {AudioStreamInfo.TargetBitrateBps / 1000}kbps / 实际 {encoder.AppliedBitrateBps / 1000}kbps");
+        Logger.Info("Part7a",
+            $"输入 {inputFrames} 帧 → ADTS {sent.Length} 个/{encodedBytes / 1024}KB（冲刷补出 {flushed} 个）, " +
+            $"头非法 {badHeader} 个, 时间戳递增={tsMonotonic}");
+        Logger.Info("Part7a",
+            $"解码回读 {got.Length} 块/{outFrames} 帧（占输入 {outFrames * 100.0 / inputFrames:F1}%）, " +
+            $"格式不符 {wrongFormat} 块, RMS={level:F3}, 过零比 左/右={crossLeft}/{crossRight}={crossRatio:F3}（期望≈0.5）");
+
+        var pass = badHeader == 0 && tsMonotonic && wrongFormat == 0 &&
+                   outFrames >= inputFrames * 85 / 100 &&
+                   level > 0.05f && level < 0.9f &&
+                   !double.IsNaN(crossRatio) && crossRatio > 0.35 && crossRatio < 0.70;
+        if (!pass) Logger.Error("Part7a", "系统声音编解码往返验证失败");
+        else Logger.Info("Part7a", "Part7a PASS");
+        return pass;
+    }
+
+    /// <summary>统计左右声道的符号翻转次数（判断声道是否分离/交换的轻量指纹）</summary>
+    private static (long Left, long Right) ZeroCrossings(short[] pcm, int frames, int channels)
+    {
+        long left = 0, right = 0;
+        short prevL = 0, prevR = 0;
+        for (var i = 0; i < frames && (i + 1) * channels <= pcm.Length; i++)
+        {
+            var l = pcm[i * channels];
+            var r = channels > 1 ? pcm[i * channels + 1] : l;
+            if (i > 0)
+            {
+                if ((l > 0) != (prevL > 0)) left++;
+                if ((r > 0) != (prevR > 0)) right++;
+            }
+            prevL = l;
+            prevR = r;
+        }
+        return (left, right);
+    }
+    /// <summary>
+    /// 7b：系统声音走一遍 LAN 端到端（采集/注入 → 加密发送 → 客户端收帧 → AAC 解码）。
+    /// 没有播放设备的机器上 loopback 起不来，此时改用手工注入：验证的仍是同一条网络与解码链路。
+    /// </summary>
+    private static bool Part7bLanAudioE2E()
+    {
+        var primary = CaptureSourceList.GetMonitors().FirstOrDefault(m => m.IsPrimary);
+        if (primary == null) { Logger.Error("Part7b", "找不到主显示器"); return false; }
+
+        const int testPort = 48762;
+        var session = new ShareSession();
+        var whitelist = new DeviceWhitelist();
+        whitelist.Approve("test-audio-device", "AutoTest Audio Viewer");   // 预批准，避免弹窗
+
+        using var server = new LanShareServer(session, whitelist, testPort);
+        server.ApproveRequired = _ => Task.FromResult(true);
+        try
+        {
+            session.Start(primary, new ShareOptions
+            {
+                Width = 640, Fps = 15, BitrateBps = 800_000,
+                RecordForValidation = false,
+                CaptureEngine = CaptureEnginePreference.Gdi,
+                ShareAudio = true,
+            });
+            server.Start();
+        }
+        catch (Exception ex)
+        {
+            Logger.Error("Part7b", "服务器启动失败", ex);
+            session.Dispose();
+            return false;
+        }
+
+        var loopbackOk = session.AudioInfo.Enabled;
+        Logger.Info("Part7b", loopbackOk
+            ? $"真实 loopback 采集已启动: {session.AudioInfo.SampleRate}Hz/{session.AudioInfo.Channels}ch {session.AudioInfo.Codec}（{session.AudioInfo.EncoderName}）"
+            : "loopback 采集不可用，将改用手工注入音频帧");
+
+        long audioFrames = 0, audioBytes = 0, decodedChunks = 0, decodedSamples = 0;
+        var lastTs = 0L;
+        var badHeader = 0;
+        var tsBroken = 0;
+        var decodeFailed = 0;
+        var connectedEvent = new ManualResetEventSlim(false);
+        var audioDecoder = new MfAacDecoder();
+        audioDecoder.Decoded += c =>
+        {
+            Interlocked.Increment(ref decodedChunks);
+            Interlocked.Add(ref decodedSamples, c.Frames);
+        };
+
+        var client = new LanShareClient("127.0.0.1", testPort,
+            "test-audio-device", "AutoTest Audio Viewer", session.Password);
+        client.StateChanged += (s, _) => { if (s == ConnectionState.Connected) connectedEvent.Set(); };
+        // 回调必须在 Start 之前挂好：否则连接建立后头几帧收到了却没被计数
+        client.AudioFrameReceived += f =>
+        {
+            var n = Interlocked.Increment(ref audioFrames);
+            Interlocked.Add(ref audioBytes, f.PayloadSize);
+            var prev = Interlocked.Exchange(ref lastTs, f.TimestampUtc);
+            if (n > 1 && f.TimestampUtc <= prev) Interlocked.Increment(ref tsBroken);
+            if (!Adts.TryReadHeader(f.Data, out _, out _, out _)) Interlocked.Increment(ref badHeader);
+            try { audioDecoder.Decode(f.Data, f.TimestampUtc); }
+            catch (Exception ex)
+            {
+                if (Interlocked.Increment(ref decodeFailed) == 1)
+                    Logger.Warn("Part7b", "音频解码异常: " + FirstLine(ex.Message));
+            }
+        };
+
+        // 注入器只在 loopback 不可用时启动，且必须在客户端连上之后再开，否则帧全被丢掉
+        CancellationTokenSource? injectCts = null;
+        Task? injectTask = null;
+        try
+        {
+            client.Start();
+            var connected = connectedEvent.Wait(TimeSpan.FromSeconds(10));
+            if (!connected)
+            {
+                Logger.Error("Part7b", "客户端 10 秒内未连上");
+                return false;
+            }
+
+            if (!loopbackOk)
+            {
+                injectCts = new CancellationTokenSource();
+                injectTask = Task.Run(() => InjectSyntheticAudio(server, injectCts.Token));
+            }
+            Thread.Sleep(6000);   // 收 6 秒音频流（约 280 个 AAC 帧）
+        }
+        finally
+        {
+            try { injectCts?.Cancel(); injectTask?.Wait(2000); } catch { }
+            injectCts?.Dispose();
+        }
+
+        var audioInfo = client.Audio;
+        var encEnabled = client.IsEncrypted;
+        var received = Interlocked.Read(ref audioFrames);
+        var chunks = Interlocked.Read(ref decodedChunks);
+        var samples = Interlocked.Read(ref decodedSamples);
+        client.Stop();
+        client.Dispose();
+        audioDecoder.Dispose();
+        server.Stop();
+        session.Stop("part7b-end");
+
+        // 6 秒 @1024 样本/帧 ≈ 281 帧；阈值取 1/5，留出机器负载与静音补齐节奏的余量
+        Logger.Info("Part7b",
+            $"加密={encEnabled}, 会话音频={(audioInfo.Enabled ? $"{audioInfo.SampleRate}Hz/{audioInfo.Channels}ch {audioInfo.Codec}" : "未启用")}, " +
+            $"收到 {received} 帧/{audioBytes / 1024}KB, ADTS 头非法 {badHeader} 个, 时间戳乱序 {tsBroken} 次, " +
+            $"解码 {chunks} 块/{samples} 样本({samples * 1000.0 / AudioStreamInfo.SampleRate:F0}ms), 解码异常 {decodeFailed} 次");
+
+        var pass = encEnabled && audioInfo.Enabled &&
+                   audioInfo.SampleRate == AudioStreamInfo.SampleRate &&
+                   audioInfo.Channels == AudioStreamInfo.Channels &&
+                   audioInfo.Codec == AudioStreamInfo.Codec &&
+                   received >= 50 && Volatile.Read(ref badHeader) == 0 &&
+                   Volatile.Read(ref tsBroken) == 0 && Volatile.Read(ref decodeFailed) == 0 &&
+                   chunks >= received * 8 / 10;
+        if (!pass) Logger.Error("Part7b", "系统声音 LAN 端到端验证失败");
+        else Logger.Info("Part7b", "Part7b PASS");
+        return pass;
+    }
+
+    /// <summary>
+    /// loopback 不可用时的替身：合成 PCM → AAC → 直接交给服务器分发。
+    /// 走的是与真实采集完全相同的编码器和发送路径，只是声音来源换成了合成正弦波。
+    /// </summary>
+    private static void InjectSyntheticAudio(LanShareServer server, CancellationToken ct)
+    {
+        using var encoder = new MfAacEncoder();
+        encoder.Encoded += f =>
+        {
+            try { server.OnAudioFrame(f); } catch { /* 客户端已断开，忽略 */ }
+        };
+        var pcm = new short[AudioStreamInfo.ChunkFrames * AudioStreamInfo.Channels];
+        var startTicks = DateTime.UtcNow.Ticks;
+        long sampleIndex = 0;
+        while (!ct.IsCancellationRequested)
+        {
+            var chunkStart = sampleIndex;
+            for (var i = 0; i < AudioStreamInfo.ChunkFrames; i++)
+            {
+                var v = (short)(short.MaxValue * 0.25 *
+                    Math.Sin(2 * Math.PI * 440 * (chunkStart + i) / AudioStreamInfo.SampleRate));
+                pcm[i * AudioStreamInfo.Channels] = v;
+                pcm[i * AudioStreamInfo.Channels + 1] = v;
+            }
+            sampleIndex += AudioStreamInfo.ChunkFrames;
+            encoder.Encode(pcm, AudioStreamInfo.ChunkFrames,
+                startTicks + chunkStart * TimeSpan.TicksPerSecond / AudioStreamInfo.SampleRate);
+            try { Thread.Sleep(AudioStreamInfo.ChunkMs); } catch { break; }
+        }
+    }
+
+    /// <summary>
+    /// 7c：WASAPI loopback 软性探测。没有播放设备（声卡禁用、远程会话、无声卡 CI）时
+    /// 只记告警并返回 true——「本机没声卡」不是产品的 bug，不该让冒烟测试变红。
+    /// </summary>
+    private static bool Part7cLoopbackProbe()
+    {
+        try
+        {
+            using var capture = new LoopbackAudioCapture();
+            var chunks = 0;
+            capture.ChunkArrived += _ => Interlocked.Increment(ref chunks);
+            capture.Start();
+            Thread.Sleep(1500);
+            capture.Stop();
+
+            var got = Volatile.Read(ref chunks);
+            Logger.Info("Part7c",
+                $"loopback 采集 {got} 块（真实 {capture.CapturedChunks} / 静音补齐 {capture.SilenceChunks}）, " +
+                $"设备混音格式 {capture.DeviceSampleRate}Hz/{capture.DeviceChannels}ch float={capture.DeviceIsFloat}, " +
+                $"峰值电平={capture.PeakLevel:F3}");
+            // 20ms 一块，1.5 秒理论约 75 块；明显偏少说明采集线程节奏有问题
+            if (got < 30) Logger.Warn("Part7c", $"块数偏少（{got}），loopback 采集节奏可能不稳");
+            else Logger.Info("Part7c", "Part7c PASS（软性）");
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn("Part7c", $"loopback 采集不可用（本机没有可用播放设备？）: {FirstLine(ex.Message)}");
+        }
+        return true;
+    }
 }
