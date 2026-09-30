@@ -1,4 +1,5 @@
 using Vortice.Direct3D11;
+using WindowShare.Core.Audio;
 using WindowShare.Core.Capture;
 using WindowShare.Core.Encoding;
 using WindowShare.Core.Logging;
@@ -27,6 +28,19 @@ public sealed record ShareOptions
     public string? RecordFilePath { get; init; }
     /// <summary>捕获引擎偏好（默认自动降级；指定 GDI 可获得与屏幕内容无关的稳定帧率）</summary>
     public CaptureEnginePreference CaptureEngine { get; init; } = CaptureEnginePreference.Auto;
+    /// <summary>
+    /// 同时共享系统声音（WASAPI loopback 采集「默认播放设备正在播的内容」，不是麦克风）。
+    /// 失败会自动降级为纯视频共享，不影响画面。
+    /// </summary>
+    public bool ShareAudio { get; init; }
+}
+
+/// <summary>会话音频参数（Viewer 据此决定是否起播、用什么采样率建解码器）</summary>
+public sealed record AudioSessionInfo(
+    bool Enabled, int SampleRate, int Channels, string Codec, string EncoderName)
+{
+    /// <summary>本次会话不共享声音</summary>
+    public static AudioSessionInfo Disabled { get; } = new(false, 0, 0, "", "");
 }
 
 /// <summary>
@@ -48,10 +62,21 @@ public sealed class ShareSession : IDisposable
         void OnShareStopped(string reason);
     }
 
+    /// <summary>
+    /// 可选的音频接收端接口。与 <see cref="IFrameSink"/> 分开而不是往里加方法：
+    /// 音频是可选能力，只共享视频的接收端（文件写入、WebRTC 回退）不必被迫实现。
+    /// 分发时用 <c>sink is IAudioSink</c> 判定，老接收端零改动。
+    /// </summary>
+    public interface IAudioSink
+    {
+        void OnAudioFrame(EncodedAudioFrame frame);
+    }
+
     private readonly object _gate = new();
     private ICaptureEngine? _engine;
     private EncoderPipeline? _pipeline;
     private H264FileWriter? _fileWriter;
+    private AudioPipeline? _audio;
     private GpuVideoProcessor? _previewConverter;
     private readonly List<IFrameSink> _sinks = new();
     private ID3D11Texture2D? _previewStaging;
@@ -82,6 +107,22 @@ public sealed class ShareSession : IDisposable
 
     /// <summary>当前编码输出尺寸（未共享时为 0×0）</summary>
     public (int Width, int Height) OutputSize => _pipeline?.OutputSize ?? (0, 0);
+
+    /// <summary>本次会话的音频参数（未启用/启动失败时为 Disabled）</summary>
+    public AudioSessionInfo AudioInfo
+    {
+        get
+        {
+            var audio = _audio;
+            return audio is { IsRunning: true }
+                ? new AudioSessionInfo(true, audio.SampleRate, audio.Channels,
+                    AudioStreamInfo.Codec, audio.EncoderName)
+                : AudioSessionInfo.Disabled;
+        }
+    }
+
+    /// <summary>系统声音电平（0..1，Host UI 显示「正在传声音」）</summary>
+    public float AudioLevel => _audio?.Level ?? 0f;
 
     /// <summary>已接入的接收端列表（快照）</summary>
     public IReadOnlyList<string> SinkNames
@@ -175,13 +216,43 @@ public sealed class ShareSession : IDisposable
             };
             engine.FrameArrived += OnFrameArrived;
 
+            // 系统声音（可选）：放在视频管线起来之后，失败只降级为纯视频
+            if (options.ShareAudio)
+                StartAudio();
+
             // 编码分辨率跟随源（首个帧到达后自动确定，动态分辨率上限由拥塞控制调整）
             _startTicks = DateTime.UtcNow.Ticks;
             engine.Start(source);
             IsSharing = true;
             Logger.Info("Session",
                 $"共享已开始: 房间号={RoomCode}, {encWidth}x{encHeight}@{fps}fps {options.BitrateBps / 1000}kbps, " +
-                $"编码器={EncoderName}, 硬件={IsHardwareEncoder}, 零拷贝={IsZeroCopy}");
+                $"编码器={EncoderName}, 硬件={IsHardwareEncoder}, 零拷贝={IsZeroCopy}" +
+                $"，系统声音={(AudioInfo.Enabled ? AudioInfo.EncoderName : "未共享")}");
+        }
+    }
+
+    /// <summary>
+    /// 启动系统声音采集与编码。任何失败都只降级为「纯视频共享」：
+    /// 没有播放设备、没有 AAC 编码器、音频服务未启动，都不该让整场共享起不来。
+    /// </summary>
+    private void StartAudio()
+    {
+        AudioPipeline? audio = null;
+        try
+        {
+            audio = new AudioPipeline();
+            audio.Encoded += DispatchAudioToSinks;
+            audio.Start();
+            _audio = audio;
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn("Session", $"系统声音共享启动失败，本次只共享视频: {ex.Message}");
+            if (audio != null)
+            {
+                audio.Encoded -= DispatchAudioToSinks;
+                try { audio.Dispose(); } catch { }
+            }
         }
     }
 
@@ -217,6 +288,7 @@ public sealed class ShareSession : IDisposable
     {
         ICaptureEngine? engine;
         EncoderPipeline? pipeline;
+        AudioPipeline? audio;
         IFrameSink[] sinks;
         lock (_gate)
         {
@@ -224,13 +296,23 @@ public sealed class ShareSession : IDisposable
             IsSharing = false;
             engine = _engine;
             pipeline = _pipeline;
+            audio = _audio;
             sinks = _sinks.ToArray();
             _engine = null;
             _pipeline = null;
+            _audio = null;
         }
 
         if (engine != null) engine.FrameArrived -= OnFrameArrived;
         try { engine?.Stop(); } catch (Exception ex) { Logger.Warn("Session", $"停止捕获异常: {ex.Message}"); }
+        // 音频先停并冲刷：尾部几帧要在通知 sink 断开之前发出去，观看端才不会被截断
+        if (audio != null)
+        {
+            try { audio.Stop(); }
+            catch (Exception ex) { Logger.Warn("Session", $"停止音频采集异常: {ex.Message}"); }
+            audio.Encoded -= DispatchAudioToSinks;
+            try { audio.Dispose(); } catch { }
+        }
         if (pipeline != null)
         {
             pipeline.Encoded -= DispatchToSinks;
@@ -287,6 +369,22 @@ public sealed class ShareSession : IDisposable
             catch (Exception ex)
             {
                 Logger.Warn("Session", $"分发帧到 {sink.Name} 失败: {ex.Message}");
+            }
+        }
+    }
+
+    /// <summary>分发音频帧到实现了 <see cref="IAudioSink"/> 的接收端（其余接收端跳过）</summary>
+    private void DispatchAudioToSinks(EncodedAudioFrame frame)
+    {
+        IFrameSink[] sinks;
+        lock (_gate) sinks = _sinks.ToArray();
+        foreach (var sink in sinks)
+        {
+            if (sink is not IAudioSink audioSink) continue;
+            try { audioSink.OnAudioFrame(frame); }
+            catch (Exception ex)
+            {
+                Logger.Warn("Session", $"分发音频帧到 {sink.Name} 失败: {ex.Message}");
             }
         }
     }

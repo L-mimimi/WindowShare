@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
+using WindowShare.Core.Audio;
 using WindowShare.Core.Capture;
 using WindowShare.Core.Encoding;
 using WindowShare.Core.Logging;
@@ -22,7 +23,7 @@ public sealed record ViewerInfo(string DeviceId, string DeviceName, string Remot
 ///   - 同时仍请求关键帧；处理 Ping/KeyframeRequest/Bye。
 /// 只读共享协议：不存在任何输入/控制消息。
 /// </summary>
-public sealed class LanShareServer : ShareSession.IFrameSink, IDisposable
+public sealed class LanShareServer : ShareSession.IFrameSink, ShareSession.IAudioSink, IDisposable
 {
     public const int DefaultPort = 48750;
 
@@ -159,6 +160,25 @@ public sealed class LanShareServer : ShareSession.IFrameSink, IDisposable
             Logging.Logger.Warn("LanServer", $"观看者 {c.DeviceName} 消费慢，开始丢帧");
     }
 
+    /// <summary>
+    /// 分发一帧系统声音。音频与视频走各自独立的队列和发送循环：
+    /// 视频队列积压时不该把声音一起拖住（人耳对卡顿远比眼睛敏感），
+    /// 反之音频积压也不该挤占视频的发送时机。TCP 层对发送加了锁，两个循环并发写是安全的。
+    /// </summary>
+    public void OnAudioFrame(EncodedAudioFrame frame)
+    {
+        List<ClientSession> targets;
+        lock (_clientsGate)
+            targets = _clients.Where(c => c.Authenticated).ToList();
+        if (targets.Count == 0) return;
+
+        foreach (var c in targets)
+        {
+            if (!c.TryEnqueueAudio(frame) && Interlocked.Increment(ref c.DroppedAudioFrames) % 100 == 1)
+                Logging.Logger.Warn("LanServer", $"观看者 {c.DeviceName} 音频队列已满，开始丢音频帧");
+        }
+    }
+
     public void OnShareStopped(string reason)
     {
         List<ClientSession> targets;
@@ -260,12 +280,18 @@ public sealed class LanShareServer : ShareSession.IFrameSink, IDisposable
                 try { SendLoopAsync(clientSession, ct); }
                 catch (Exception ex) { Logging.Logger.Warn("LanServer", $"发送任务异常退出: {ex.GetType().Name}: {ex.Message}"); }
             }, ct);
+            // 音频独立发送循环（与视频队列互不阻塞）
+            var audioSenderTask = Task.Run(() =>
+            {
+                try { AudioSendLoopAsync(clientSession, ct); }
+                catch (Exception ex) { Logging.Logger.Warn("LanServer", $"音频发送任务异常退出: {ex.GetType().Name}: {ex.Message}"); }
+            }, ct);
             var receiveTask = Task.Run(() =>
             {
                 try { ReceiveLoopAsync(clientSession, ct); }
                 catch (Exception ex) { Logging.Logger.Warn("LanServer", $"接收任务异常退出: {ex.GetType().Name}: {ex.Message}"); }
             }, ct);
-            await Task.WhenAny(senderTask, receiveTask);
+            await Task.WhenAny(senderTask, audioSenderTask, receiveTask);
         }
         catch (Exception ex)
         {
@@ -372,6 +398,7 @@ public sealed class LanShareServer : ShareSession.IFrameSink, IDisposable
             }
             ecdh?.Dispose();
 
+            var audioInfo = _session.AudioInfo;
             var result = AuthPayload.Serialize(new AuthResultPayload
             {
                 Ok = true,
@@ -379,11 +406,18 @@ public sealed class LanShareServer : ShareSession.IFrameSink, IDisposable
                 EncoderName = _session.EncoderName,
                 Width = _session.Source?.Bounds.Width ?? 0,
                 Height = _session.Source?.Bounds.Height ?? 0,
+                AudioEnabled = audioInfo.Enabled,
+                AudioSampleRate = audioInfo.SampleRate,
+                AudioChannels = audioInfo.Channels,
+                AudioCodec = audioInfo.Codec,
+                AudioEncoderName = audioInfo.EncoderName,
             });
             conn.Send(MessageType.AuthResult, FrameFlags.None, result);
 
             MarkAuthenticated(client);
-            Logging.Logger.Info("LanServer", $"观看者接入成功: {client.DeviceName} ({client.RemoteAddress}) 加密={encEnabled}");
+            Logging.Logger.Info("LanServer",
+                $"观看者接入成功: {client.DeviceName} ({client.RemoteAddress}) 加密={encEnabled} " +
+                $"系统声音={(audioInfo.Enabled ? $"{audioInfo.SampleRate}Hz/{audioInfo.Channels}ch {audioInfo.Codec}" : "未共享")}");
             return true;
         }, ct);
 
@@ -492,6 +526,42 @@ public sealed class LanShareServer : ShareSession.IFrameSink, IDisposable
             return _clients.Count(c => c.Authenticated);
     }
 
+    /// <summary>
+    /// 音频发送循环：独立于视频，只服务音频队列。
+    /// 帧头里的 TimestampUtc 由 TcpFrameConnection.Send 统一填 DateTime.UtcNow，
+    /// 而音画同步需要的是「采集时刻」，所以这里走带时间戳的重载把采集时间戳原样带过去。
+    /// </summary>
+    private void AudioSendLoopAsync(ClientSession client, CancellationToken ct)
+    {
+        while (IsRunning && !ct.IsCancellationRequested && client.Connection.IsConnected)
+        {
+            EncodedAudioFrame? frame = null;
+            try
+            {
+                if (!client.AudioQueue.TryTake(out frame, 200, ct)) continue;
+            }
+            catch (OperationCanceledException) { break; }
+            catch (InvalidOperationException) { break; }   // 队列已 CompleteAdding
+            catch (Exception ex)
+            {
+                Logging.Logger.Warn("LanServer", $"音频 TryTake 异常: {ex.GetType().Name}: {ex.Message}");
+                break;
+            }
+            if (frame == null) continue;
+
+            try
+            {
+                client.Connection.Send(MessageType.AudioFrame, FrameFlags.None, frame.TimestampUtc, frame.Data);
+                Interlocked.Increment(ref client.SentAudioFrames);
+            }
+            catch (Exception ex)
+            {
+                Logging.Logger.Warn("LanServer", $"音频帧发送失败: {ex.GetType().Name}: {ex.Message}");
+                break;
+            }
+        }
+    }
+
     public void Dispose() => Stop();
 
     /// <summary>单观看者会话（连接 + 发送队列）</summary>
@@ -509,6 +579,13 @@ public sealed class LanShareServer : ShareSession.IFrameSink, IDisposable
         public long LastDroppedSnapshot;
         /// <summary>有界发送队列（约 8 秒缓冲；满则丢帧）</summary>
         public BlockingCollection<EncodedVideoFrame> Queue { get; } = new(240);
+        /// <summary>
+        /// 音频专用有界队列。50 帧 ≈ 1 秒（20ms 一帧）：音频积压到这个量已经明显听得出延迟，
+        /// 与其继续攒不如丢掉，让 Viewer 端重新蓄水后对齐。
+        /// </summary>
+        public BlockingCollection<EncodedAudioFrame> AudioQueue { get; } = new(50);
+        public long SentAudioFrames;
+        public long DroppedAudioFrames;
 
         public ClientSession(TcpFrameConnection connection, string remote)
         {
@@ -528,9 +605,22 @@ public sealed class LanShareServer : ShareSession.IFrameSink, IDisposable
             }
         }
 
+        public bool TryEnqueueAudio(EncodedAudioFrame frame)
+        {
+            try
+            {
+                return AudioQueue.TryAdd(frame);
+            }
+            catch (InvalidOperationException)
+            {
+                return false;
+            }
+        }
+
         public void Close()
         {
             try { Queue.CompleteAdding(); } catch { }
+            try { AudioQueue.CompleteAdding(); } catch { }
             Connection.Dispose();
         }
     }

@@ -1,8 +1,10 @@
 using System.Net.Sockets;
+using WindowShare.Core.Audio;
 using WindowShare.Core.Encoding;
 using WindowShare.Core.Logging;
 using WindowShare.Core.Protocol;
 using WindowShare.Core.Security;
+using WindowShare.Core.Session;
 
 namespace WindowShare.Core.Network;
 
@@ -44,11 +46,17 @@ public sealed class LanShareClient : IDisposable
     public string HostInfo { get; private set; } = "";
     public bool IsEncrypted { get; private set; }
 
+    /// <summary>本次会话的系统声音参数（Host 未共享时为 Disabled）</summary>
+    public AudioSessionInfo Audio { get; private set; } = AudioSessionInfo.Disabled;
+
     /// <summary>状态变化（UI 调度）</summary>
     public event Action<ConnectionState, string?>? StateChanged;
 
     /// <summary>收到一帧 H.264（Annex-B）</summary>
     public event Action<EncodedVideoFrame>? FrameReceived;
+
+    /// <summary>收到一帧系统声音（ADTS 封装的 AAC）</summary>
+    public event Action<EncodedAudioFrame>? AudioFrameReceived;
 
     /// <summary>RTT 更新（毫秒）</summary>
     public event Action<double>? RttUpdated;
@@ -120,6 +128,7 @@ public sealed class LanShareClient : IDisposable
 
                 IsEncrypted = result.Encrypted;
                 HostInfo = result.Info;
+                Audio = result.Audio ?? AudioSessionInfo.Disabled;
                 backoffMs = 500; // 重置退避
 
                 // 认证成功 → 请求关键帧快速出画面
@@ -180,7 +189,8 @@ public sealed class LanShareClient : IDisposable
         }
     }
 
-    private sealed record AuthOutcome(bool Ok, string Reason, bool Encrypted, string Info);
+    private sealed record AuthOutcome(bool Ok, string Reason, bool Encrypted, string Info,
+        AudioSessionInfo? Audio = null);
 
     /// <summary>三步认证（同步帧 IO，在专用任务上执行）</summary>
     private AuthOutcome Authenticate(TcpFrameConnection conn)
@@ -242,7 +252,17 @@ public sealed class LanShareClient : IDisposable
 
             var info = $"编码器: {result.EncoderName}" +
                        (result.Width > 0 ? $"  源: {result.Width}x{result.Height}" : "");
-            return new AuthOutcome(true, "", result.EncryptionEnabled, info);
+            var audio = result.AudioEnabled
+                ? new AudioSessionInfo(true,
+                    result.AudioSampleRate > 0 ? result.AudioSampleRate : AudioStreamInfo.SampleRate,
+                    result.AudioChannels > 0 ? result.AudioChannels : AudioStreamInfo.Channels,
+                    string.IsNullOrEmpty(result.AudioCodec) ? AudioStreamInfo.Codec : result.AudioCodec,
+                    result.AudioEncoderName)
+                : AudioSessionInfo.Disabled;
+            if (audio.Enabled)
+                Logging.Logger.Info("LanClient",
+                    $"Host 正在共享系统声音: {audio.SampleRate}Hz/{audio.Channels}ch {audio.Codec}");
+            return new AuthOutcome(true, "", result.EncryptionEnabled, info, audio);
         }
         catch (Exception ex)
         {
@@ -265,6 +285,17 @@ public sealed class LanShareClient : IDisposable
                     TimestampUtc = hdr.TimestampUtc,
                     Width = 0,
                     Height = 0,
+                });
+                break;
+            }
+            case MessageType.AudioFrame:
+            {
+                AudioFrameReceived?.Invoke(new EncodedAudioFrame
+                {
+                    Data = payload,
+                    TimestampUtc = hdr.TimestampUtc,
+                    SampleRate = Audio.SampleRate,
+                    Channels = Audio.Channels,
                 });
                 break;
             }
