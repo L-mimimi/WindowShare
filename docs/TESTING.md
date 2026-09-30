@@ -17,8 +17,13 @@ dotnet test
 | `AppPathsTests` | 便携/安装模式数据目录决策、只读位置回退 `%APPDATA%`、环境变量优先级、设备 ID 稳定性 |
 | `VideoFormatPlannerTests` | 帧率档位、4K 上限、等比缩放取偶且不上采样、码率推算边界与单调性、`SuggestH264Level` 各档位、Level 展示名 |
 | `GopCacheTests` | GOP 缓存：以 IDR 开头才可补发、新 IDR 开启新一轮、帧数/字节越界后等到下一个 IDR 再积累、分辨率切换作废缓存、快照与后续追加互不干扰 |
+| `AdtsTests` | ADTS 封装往返、44.1 kHz 与 5.1 的 `sampling_frequency_index`、超长裸帧与非法声道数拒绝、`TryReadHeader` 解析与各类非法头拒绝 |
+| `PcmConvertTests` | float32 ↔ int16 转换与削波（不环绕）、单声道→立体声、环绕声下混不越界、重采样恒等/半率/直流电平保持、立体声→单声道设备混音、多声道设备补静音、RMS 电平 |
+| `SampleTimelineTests` | 采集时间戳时间线：无标记时的行为、标记之间插值、首标记前外推、末标记后外推、乱序标记被忽略、长时间运行裁剪后仍准确、Reset 清空 |
+| `AvSyncClockTests` | 音画同步时钟：无音频时一律立即上屏、画面远早于音频时等待、阈值内上屏、落后于音频时立即上屏、首帧前时钟无效、更新之间外推、Reset 使时钟失效、视频偏移毫秒数符号 |
+| `AudioStreamInfoTests` | 音频流常量自洽（块长 / 块帧数 / 块时长）、格式标识对 ADTS 友好、非法采样率被拒 |
 
-期望结果：**92/92 通过**。
+期望结果：**136/136 通过**（其中音频相关 5 个测试类、44 项）。
 
 ## 2. 冒烟测试（真实捕获本机屏幕）
 
@@ -26,7 +31,7 @@ dotnet test
 dotnet run --project tools/WindowShare.SmokeTest
 ```
 
-会依次执行 6 个部分，全部 `PASS` 时退出码为 0：
+会依次执行 7 个部分，全部 `PASS` 时退出码为 0：
 
 | 部分 | 内容 | 通过标准 |
 |------|------|----------|
@@ -37,6 +42,7 @@ dotnet run --project tools/WindowShare.SmokeTest
 | Part4 | 回环端到端：ShareSession + LAN 服务器 → 客户端 + 解码器（GDI 定速捕获） | 连接成功、加密启用、收帧 ≥40、解码帧数 ≥ 首个 IDR 后可解码帧数的 90%、**收到的第一帧就是 IDR**（GOP 补发生效） |
 | Part5 | 信令服务器回环（含错误密码负向用例） | 错误密码被拒、审批通过、取到 LAN 端点 |
 | Part6 | WebRTC 回环（DTLS-SRTP + H.264 RTP，GDI 定速捕获） | 连接成功、收帧 ≥30、解码帧数 ≥ 投喂帧数的 90% |
+| Part7 | 系统声音：**7a** AAC 编解码往返（合成双声道正弦波 → AAC → 解回 PCM）、**7b** LAN 音频端到端（ShareSession → LanShareServer → LanShareClient → 解码）、**7c** WASAPI loopback 探测 | 7a：ADTS 头全部自描述且与帧长一致、时间戳严格递增、解回帧数 ≥ 输入的 85%、格式不符 0 块、RMS ∈ (0.05, 0.9)、左右声道过零比 ∈ (0.35, 0.70)（期望 ≈0.5，可抓住声道交换/被下混/重采样系数写错）；7b：加密开启、会话音频参数与约定一致、收帧 ≥50、ADTS 头非法 0、时间戳乱序 0、解码异常 0、解码块数 ≥ 收帧数的 80%；7c 为软性探测，不计入 Part7 通过条件 |
 
 产物：`%APPDATA%\WindowShare\recordings\smoke-*.h264`，可用 ffprobe 验证：
 
@@ -49,6 +55,12 @@ ffprobe -f h264 "$env:APPDATA\WindowShare\recordings\smoke-synthetic.h264"
 
 > Part4 / Part6 显式指定 `CaptureEnginePreference.Gdi`（定速轮询，出帧节奏与屏幕内容无关），
 > 避免静态桌面下 WGC 只出约 8fps 导致比例断言抖动；断言均为比例式而非绝对帧数。
+
+> Part7c 只探测 WASAPI loopback 能否采集：没有播放设备的机器（声卡被禁用、远程会话、无声卡 CI）
+> 上它只记告警并返回 true——「本机没声卡」不是产品的 bug，不该让冒烟测试变红。
+> Part7b 在 loopback 起不来时自动改用合成正弦波手工注入，验证的仍是同一条编码、网络与解码链路。
+> Part7 实测参考（本机）：7a 输入 96000 帧 → 91 个 ADTS 帧 → 解回 90 块 / 92160 帧（96.0%）、
+> RMS 0.211、过零比 0.500；7b 6 秒收到 280 帧 / 95 KB → 解出 279 块 / 285696 样本（5952 ms）、解码异常 0 次。
 
 > Part4 连接前会等 `LanShareServer.CachedGopFrames > 0`（最多 10 秒），确保服务器已攒出
 > 一个以 IDR 开头的 GOP。本机 `Microsoft AVC DX12 Encoder` 对 `CODECAPI_AVEncVideoForceKeyFrame`
@@ -124,13 +136,26 @@ dotnet run --project src\WindowShare.Host -- --autotest
 - [ ] 未在 `whitelist.json` 的设备且拒绝审批 → 无法接入
 - [ ] 共享期间检查：无任何输入注入相关进程/调用（本软件不含该功能）
 
+### 4.9 系统声音（1.2.0）
+
+- [ ] Host 勾选「共享系统声音」后开始共享，界面出现声音状态与实时电平；日志有 `系统声音采集已启动: 设备 <采样率>Hz/<声道>ch/float32 → 输出 48000Hz/2ch/int16`
+- [ ] Viewer 端播放音乐/视频 → Host 电平跳动，Viewer 能听到同样的声音
+- [ ] 音画同步：播一段对口型视频，画面与声音不脱节；Viewer 状态栏显示「声音：播放中 XXms」
+- [ ] Viewer 取消勾选「播放系统声音」→ 立即静音、状态栏变「声音：已静音」，且画面延迟变低（不再等待音频时钟）
+- [ ] Host 未勾选「共享系统声音」→ Viewer 状态栏显示「声音：Host 未共享」，画面一切正常
+- [ ] 抓包（TCP 48750）确认 `AudioFrame` 负载为密文（与 VideoFrame 同一把会话密钥）
+- [ ] 禁用播放设备 / 无声卡环境下开始共享 → 自动降级为纯视频，画面不受影响，日志记录降级原因
+- [ ] 共享过程中切换默认播放设备 → 声音可能中断（已知限制），停止后重新开始即恢复
+- [ ] 确认不采集麦克风：对着麦克风说话，Viewer 端听不到任何声音
+- [ ] 拥塞降档触发分辨率变化时画面不花屏（编码器已按新尺寸重建）
+
 ## 5. 安装包验证
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\build.ps1 -Package
 ```
 
-- [ ] `installer\output\WindowShare-Setup-1.1.1.exe` 生成
+- [ ] `installer\output\WindowShare-Setup-1.2.0.exe` 生成
 - [ ] 双击安装（无需管理员权限），开始菜单出现 Host / Viewer 快捷方式
 - [ ] 从开始菜单启动 Host，功能与开发构建一致
 - [ ] 卸载后 `%APPDATA%\WindowShare`（白名单/设置）保留，程序目录被清理

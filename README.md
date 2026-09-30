@@ -1,26 +1,34 @@
 # WindowShare（窗享）
 
-Windows 只读屏幕/窗口共享软件：**Host 端**捕获整个屏幕或指定窗口，H.264 编码后经局域网 TCP 或 WebRTC 发送；**Viewer 端**接收、解码、显示；**信令服务器**负责房间号、临时密码、设备上线与 SDP/ICE 交换。
+Windows 只读屏幕/窗口共享软件：**Host 端**捕获整个屏幕或指定窗口，H.264 编码后经局域网 TCP 或 WebRTC 发送，并可选同时共享**系统声音**（AAC-LC，与画面走同一条加密通道）；**Viewer 端**接收、解码、显示，并以音频播放时钟为主对齐音画；**信令服务器**负责房间号、临时密码、设备上线与 SDP/ICE 交换。
 
-> **本项目为只读共享**：不包含任何远程控制功能，不生成任何输入注入代码（无 SendInput / keybd_event / mouse_event / 反向输入通道），不包含 Android 端，不涉及权限提升。
+> **本项目为只读共享**：不包含任何远程控制功能，不生成任何输入注入代码（无 SendInput / keybd_event / mouse_event / 反向输入通道），不包含 Android 端，不涉及权限提升。共享的「系统声音」取自 WASAPI loopback（本机**正在播放**的内容），**不采集麦克风**，同样只有 Host → Viewer 一个方向。
 
 ## 下载（Windows x64）
 
-最新版本 **v1.1.1** ｜ [全部发布版本](https://github.com/L-mimimi/WindowShare/releases)
+最新版本 **v1.2.0** ｜ [全部发布版本](https://github.com/L-mimimi/WindowShare/releases)
 
 | 类型 | 文件 | 大小 | 说明 |
 |------|------|------|------|
-| 安装版 | [WindowShare-Setup-1.1.1.exe](https://github.com/L-mimimi/WindowShare/releases/download/v1.1.1/WindowShare-Setup-1.1.1.exe) | 87.9 MB | Inno Setup per-user 安装，**无需管理员权限**；数据写入 `%APPDATA%\WindowShare` |
-| 便携版 | [WindowShare-Portable-1.1.1.zip](https://github.com/L-mimimi/WindowShare/releases/download/v1.1.1/WindowShare-Portable-1.1.1.zip) | 122.2 MB | 解压即用，可放 U 盘；数据全部存于程序目录 `data\` |
+| 安装版 | [WindowShare-Setup-1.2.0.exe](https://github.com/L-mimimi/WindowShare/releases/download/v1.2.0/WindowShare-Setup-1.2.0.exe) | 88.0 MB | Inno Setup per-user 安装，**无需管理员权限**；数据写入 `%APPDATA%\WindowShare` |
+| 便携版 | [WindowShare-Portable-1.2.0.zip](https://github.com/L-mimimi/WindowShare/releases/download/v1.2.0/WindowShare-Portable-1.2.0.zip) | 122.2 MB | 解压即用，可放 U 盘；数据全部存于程序目录 `data\` |
 
 两者均为 self-contained（win-x64），目标机器**无需预装 .NET 运行时**。系统要求：Windows 10 1903（10.0.18362）或更高。
 
 校验（SHA256）：
 
 ```
-f70fdd85ca537c94c6a62a90dd88e61ad58ab1f60b254fd26af5df4656596167  WindowShare-Setup-1.1.1.exe
-a9995b2a821d37e37f122900201a8d36e0fb7f1c3fc2d3db2ebdcaff7f70afca  WindowShare-Portable-1.1.1.zip
+d6ca56fd948302390dbb741d5264e16c991a2e2422a9e10c8282e8287d1ead9b  WindowShare-Setup-1.2.0.exe
+683746039a0f53b1f747fdb5065d9a98f617964a6c737c0cf41ae8bdf68bfacf  WindowShare-Portable-1.2.0.zip
 ```
+
+## 1.2.0 更新
+
+- **系统声音共享（Host → Viewer，单向）**：Host 端勾上「共享系统声音」后，用 WASAPI loopback（事件模式）采集**默认播放设备正在播的内容**（游戏 / 视频 / 音乐 / 系统提示音，**不是麦克风**），重混重采样为 48 kHz 立体声 int16，经 `Microsoft AAC Audio Encoder MFT` 编成 AAC-LC（ADTS 封装、128 kbps），与画面走**同一条 TCP 通道、同一把 AES-256-GCM 会话密钥**（新增消息类型 `AudioFrame = 22`）。Viewer 端由 `Microsoft AAC Audio Decoder MFT` 解回 PCM，经 WASAPI 共享模式渲染。没有播放设备 / 没有 AAC 编解码 MFT / 启动异常时一律静默降级为纯视频共享，不弹窗打断观看。
+- **音画同步以音频时钟为主**：音频帧头带的是**采集时刻**时间戳（不是发送时刻，中间隔着编码与队列等待），Viewer 用它推进同步时钟；解码后的视频帧只入队，由独立上屏线程「等到点再画」。没有声音时（Host 未共享 / Viewer 取消勾选 / 本机无播放设备）自动退回「解码完立即上屏」，延迟更低。
+- **Viewer 可随时静音**：顶部「播放系统声音」勾选框即时生效，取消勾选同时解除音画同步等待；状态栏显示「声音：播放中 XXms」的抖动缓冲深度。
+- **分辨率切换不再花屏**：输出尺寸变化（源尺寸变化 / 拥塞降档）时重建 H.264 编码器，而不是只改 GPU 侧的目标尺寸——此前编码器的输入媒体类型仍声明旧宽高，喂进去的 NV12 与声明不符会花屏错位，观看端按旧尺寸建解码器同样解不出来。旧编码器改到后台释放，避开与 `ShareSession` 之间的锁环死锁。
+- **测试**：新增 `AudioTests`（5 个测试类、44 项，合计 **136/136**）；冒烟测试新增 **Part7 系统声音**（编解码往返 / LAN 端到端 / loopback 探测），七个部分全部 PASS。实测 2 秒双声道正弦波（左 440 Hz、右 880 Hz）编出 91 个 ADTS 帧、解回 92160 帧（占输入 96.0%）、RMS 0.211、左右过零比 0.500；LAN 端到端 6 秒收到 280 帧 / 95 KB，解出 279 块 / 285696 样本（5952 ms），解码异常 0 次。
 
 ## 1.1.1 更新
 
@@ -49,19 +57,20 @@ a9995b2a821d37e37f122900201a8d36e0fb7f1c3fc2d3db2ebdcaff7f70afca  WindowShare-Po
 | 5 | WebRTC 广域网，STUN 穿透失败走 TURN，显示直连/中继 | `Core/WebRtc` |
 | 6 | 安全与隐私：临时密码、设备白名单审批、AES-256-GCM 会话加密、DTLS-SRTP、共享悬浮提示、一键停止、仅共享指定窗口 | `Core/Security`、`Host/OverlayWindow`、`Host/ApprovalDialog` |
 | 7 | 性能：硬件编码、GPU 零拷贝、动态码率、动态分辨率、断线重连 | `Core/Network/CongestionController`、`Core/Encoding/MfH264Encoder` |
-| 8 | 打包为 Windows 安装程序 | `installer/WindowShare.iss`、`scripts/build.ps1` |
+| 8 | 系统声音共享：WASAPI loopback 采集 → AAC-LC(ADTS) → 同一条加密通道 → Viewer 解码播放，音画以音频时钟对齐 | `Core/Audio`、Host「共享系统声音」、Viewer「播放系统声音」 |
+| 9 | 打包为 Windows 安装程序 | `installer/WindowShare.iss`、`scripts/build.ps1` |
 
 ## 项目结构
 
 ```
 WindowShare/
 ├─ src/
-│  ├─ WindowShare.Core/       公共库：捕获 / 编码 / 解码 / 网络 / 协议 / 安全 / 会话
+│  ├─ WindowShare.Core/       公共库：捕获 / 编码 / 解码 / 音频 / 网络 / 协议 / 安全 / 会话
 │  ├─ WindowShare.Host/       共享端 WPF（源选择、预览、悬浮提示、一键停止、LAN 服务、WebRTC 发送）
 │  ├─ WindowShare.Viewer/     观看端 WPF（连接、解码显示、状态栏统计、WebRTC 回退）
 │  └─ WindowShare.Signaling/  ASP.NET Core + SignalR 信令服务器
-├─ tools/WindowShare.SmokeTest/  端到端冒烟测试（捕获/编码/传输/解码/信令/WebRTC）
-├─ tests/WindowShare.Core.Tests/ 单元测试（协议/密码学/统计/拥塞控制）
+├─ tools/WindowShare.SmokeTest/  端到端冒烟测试（捕获/编码/传输/解码/信令/WebRTC/系统声音）
+├─ tests/WindowShare.Core.Tests/ 单元测试（协议/密码学/统计/拥塞控制/音频）
 ├─ installer/WindowShare.iss     Inno Setup 安装脚本
 ├─ scripts/build.ps1             一键构建脚本
 └─ docs/                         PROTOCOL.md（协议）/ DEPLOY.md（部署）/ TESTING.md（测试）
@@ -73,6 +82,7 @@ WindowShare/
 - 捕获：**Windows Graphics Capture**（首选）→ **DXGI Desktop Duplication**（整屏回退）→ **GDI**（兜底）
 - 编码：**Media Foundation H.264**（自动选择：注册硬件 MFT → Microsoft AVC DX12 Encoder → 软件 MFT），支持 D3D11 纹理零拷贝
 - 解码：Media Foundation H.264 Decoder MFT
+- 音频：WASAPI loopback 采集（事件模式）→ 重混/重采样到 48 kHz 立体声 int16 → **Media Foundation AAC-LC 编解码**（ADTS 封装、128 kbps）→ WASAPI 共享模式渲染
 - 传输：局域网 **TCP 自定义二进制协议**；广域网 **WebRTC**（SIPSorcery，DTLS-SRTP）
 - 信令：**ASP.NET Core + SignalR**
 - NAT 穿透：**STUN** + **coturn TURN**
@@ -100,10 +110,11 @@ powershell -ExecutionPolicy Bypass -File scripts\build.ps1
 ### 2. 局域网使用（无需服务器）
 
 1. 在**被共享的机器**上运行 `WindowShare.Host.exe`
-2. 选择共享源（显示器 / 指定窗口）→ 选分辨率（最高 4K）与帧率（24–144）→ 「开始共享」
+2. 选择共享源（显示器 / 指定窗口）→ 选分辨率（最高 4K）与帧率（24–144）→ 要带声音就勾上「共享系统声音」→ 「开始共享」（该勾选**开始共享后改不生效**，需停止后重新开始）
 3. 屏幕上出现红色悬浮提示条（可拖动、含「⏹ 停止」按钮）；界面显示**房间号**与**临时密码**
 4. 在**观看的机器**上运行 `WindowShare.Viewer.exe`，选择「直连 IP」，填入 Host 的 IP 与密码 → 「连接」
 5. Host 首次会弹出设备审批框（允许并记住 / 仅本次 / 拒绝），批准后即可观看
+6. Viewer 顶部「播放系统声音」默认勾选，可随时取消（取消即静音，且画面不再等待音频时钟，延迟更低）；状态栏「声音：播放中 XXms」显示抖动缓冲深度
 
 ### 3. 跨网段使用（信令 + WebRTC）
 
@@ -125,7 +136,7 @@ dotnet run --project src\WindowShare.Signaling --urls http://0.0.0.0:5000
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\build.ps1 -Package
-# 产出：installer\output\WindowShare-Setup-1.1.1.exe
+# 产出：installer\output\WindowShare-Setup-1.2.0.exe
 ```
 
 需要 Inno Setup 6/7（`winget install JRSoftware.InnoSetup`）；未安装时脚本会自动通过
@@ -135,7 +146,7 @@ NuGet 包 `Tools.InnoSetup` 获取编译器，无需手工安装。安装包为 
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\build.ps1 -Portable
-# 产出：dist\portable\WindowShare-Portable-1.1.1.zip（含目录版）
+# 产出：dist\portable\WindowShare-Portable-1.2.0.zip（含目录版）
 ```
 
 解压后直接双击 `启动-共享端.bat` / `启动-观看端.bat` 即可，**无需安装、无需 .NET 运行时**。
@@ -149,7 +160,7 @@ powershell -ExecutionPolicy Bypass -File scripts\build.ps1 -Portable
 | 界面提示 | Host 界面右上角显示「便携模式/安装模式」，📁 按钮直达数据目录 |
 
 ```
-WindowShare-Portable-1.1.1/
+WindowShare-Portable-1.2.0/
 ├── WindowShare.Host.exe        共享端
 ├── WindowShare.Viewer.exe      观看端
 ├── data\                       便携数据（logs / config / recordings）
@@ -202,7 +213,8 @@ ffprobe -f h264 "%APPDATA%\WindowShare\recordings\share-*.h264"
 - **临时密码**：8 位随机（去混淆字符集，排除 0/O/1/I/L），随会话生成、会话结束即失效、不落盘
 - **设备白名单**：首次连接必须由 Host 用户在弹窗中明确批准，可勾选「允许并记住」
 - **认证**：PBKDF2-SHA256（10 万次迭代）+ HMAC 证明，且 HMAC 绑定双方 ECDH 公钥，防中间人替换密钥
-- **会话加密**：LAN 路径 ECDH P-256 → HKDF → AES-256-GCM；WebRTC 路径强制 DTLS-SRTP
+- **会话加密**：LAN 路径 ECDH P-256 → HKDF → AES-256-GCM，覆盖 VideoFrame / AudioFrame / RawFrame / StatsInfo 负载；WebRTC 路径强制 DTLS-SRTP
+- **声音同样只读单向**：只采集 WASAPI loopback（本机正在播放的内容），不打开麦克风，也不存在 Viewer → Host 的音频回传通道
 - **共享提示**：共享期间屏幕顶部常驻红色指示条；共享指定窗口时窗口周围显示红框
 - **一键停止**：悬浮条按钮 / 主界面按钮 / 关闭窗口，三种方式立即断流并通知所有观看者
 - **仅共享指定窗口**：窗口捕获只取该窗口内容，窗口之外的桌面不会被编码进视频流
@@ -214,7 +226,9 @@ ffprobe -f h264 "%APPDATA%\WindowShare\recordings\share-*.h264"
 - 局域网传输为 TCP（不做 UDP，优先保证可靠性与可运行性）
 - 信令房间表为内存态，进程重启后房间失效（临时房间语义）
 - DXGI Desktop Duplication 回退仅支持整屏（窗口捕获使用 WGC 或 GDI）
-- WebRTC 媒体为单视频轨 H.264，无音频（只读画面共享定位）
+- WebRTC 媒体为单视频轨 H.264，**不带声音**：系统声音目前只走局域网 TCP 通路，房间号模式回退到 WebRTC 时只有画面
+- 系统声音依赖本机存在可用的播放设备与 AAC 编/解码 MFT；任一缺失即自动降级为纯视频共享（只记日志，不弹窗）
+- 系统声音固定 48 kHz / 立体声 / AAC-LC 128 kbps，采集对象跟随「默认播放设备」，共享过程中切换默认设备需重新开始共享
 
 ## 文档
 

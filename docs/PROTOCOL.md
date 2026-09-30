@@ -14,7 +14,7 @@
 6     1    Type
 7     1    Flags (bit0=关键帧, bit1=负载已加密)
 8     4    Sequence（发送序号）
-12    8    TimestampUtc（发送时刻，DateTime.UtcNow.Ticks，100ns）
+12    8    TimestampUtc（DateTime.UtcNow.Ticks，100ns；控制类消息为发送时刻，媒体帧为**采集时刻**，音画同步据此对齐）
 20    4    PayloadLength（上限 8MB）
 ```
 
@@ -25,7 +25,7 @@
 | 1 | AuthRequest | V→H | JSON：deviceId/deviceName/proto/roomCode |
 | 2 | AuthChallenge | H→V | JSON：salt(B64)/enc(是否支持加密)/hostPub(ECDH P-256 SPKI, B64) |
 | 3 | AuthProof | V→H | JSON：proof(HMAC)/clientPub(B64) |
-| 4 | AuthResult | H→V | JSON：ok/reason/enc/encoder/width/height |
+| 4 | AuthResult | H→V | JSON：ok/reason/enc/encoder/width/height；1.2.0 起追加 audio/audioRate/audioCh/audioCodec/audioEnc（老版本 Host 不带这些字段，Viewer 按「无音频」处理） |
 | 10 | Ping | V→H | 8 字节时间戳 |
 | 11 | Pong | H→V | 原样返回（V 计算 RTT） |
 | 12 | KeyframeRequest | V→H | 空（Host 请求下一帧为 IDR；部分编码器不认该 CODECAPI，此时由 GOP 补发兜底，见下） |
@@ -34,6 +34,7 @@
 | 15 | StatsInfo | 双向 | JSON：H→V encoder/hw/source；V→H rttMs（拥塞反馈） |
 | 20 | VideoFrame | H→V | H.264 Annex-B 访问单元（1 帧） |
 | 21 | RawFrame | H→V | 未编码 BGRA（仅测试通路用） |
+| 22 | AudioFrame | H→V | 系统声音：ADTS 封装的 AAC-LC（48 kHz / 立体声 / 128 kbps）；帧头 TimestampUtc 是该帧第一个采样点的**采集时刻** |
 
 ### 关键帧与「接入即出画面」
 
@@ -48,6 +49,31 @@ Host 侧 `LanShareServer` 维护一份 GOP 缓存（`Core/Encoding/GopCache.cs`�
 
 补发与实时分发共用同一把锁，保证「补发的最后一帧」与「随后直发的第一帧」严格有序、不重不漏。
 缓存超过 24 MB 或 600 帧即整段作废，等下一个 IDR 重新积累；分辨率切换同样作废。
+
+### 系统声音（AudioFrame，1.2.0 起）
+
+音频与视频共用同一条 TCP 连接、同一套帧头与同一把会话密钥，只是消息类型为 `AudioFrame = 22`。
+
+| 项 | 取值 |
+|----|------|
+| 采集 | WASAPI loopback（默认播放设备**正在播放**的内容，不采集麦克风），事件模式 |
+| 采集后处理 | 重混到立体声、重采样到 48 kHz、float32 → int16；设备静默不产包时按 20 ms 补静音块，保持流连续 |
+| 编码 | Media Foundation AAC-LC，ADTS 封装（码流自描述，Viewer 不需要任何带外信息），目标 128 kbps |
+| 帧长 | 一个 AAC 帧固定 1024 采样 ≈ 21.33 ms；一个网络包里可能粘多帧，Viewer 按 ADTS 头逐帧拆分 |
+| 时间戳 | 帧头 `TimestampUtc` = 该帧第一个采样点的**采集时刻**，与视频帧同一时钟 |
+| 方向 | 只有 Host → Viewer，协议中不存在任何音频回传消息 |
+
+Viewer 侧音画同步：以音频播放时钟为主时钟。解码后的视频帧不直接上屏，而是进有界队列，
+由独立的上屏线程按 `TimestampUtc` 对齐后再画（画面早于声音就等一会儿，晚于声音就立即画）；
+队列满时丢最旧的一帧保住实时性。音频不可用时（Host 未共享 / 用户取消勾选 / 本机没有播放
+设备或没有 AAC 解码 MFT），同步时钟置为失效，视频退回「解码完立即上屏」。
+
+解码侧的一个实现坑（1.2.0 实测）：`Microsoft AAC Audio Decoder MFT` 的
+`MFT_OUTPUT_STREAM_INFO.dwFlags` 报了 `MFT_OUTPUT_STREAM_PROVIDES_SAMPLES`，但
+`ProcessOutput` 传 `pSample = NULL` 会返回 `E_INVALIDARG`，而且一次失败之后 MFT 永久卡在
+`MF_E_NOTACCEPTING`。因此输出样本一律由调用方分配（按 MF 规范，自带样本的 MFT 会忽略传入
+样本，两种情况都安全）；另外输入类型是 `MFAudioFormat_ADTS`，喂进去的样本必须带完整的
+ADTS 头，剥掉头喂裸 AAC 会表现为「一直要更多输入、一帧 PCM 都出不来」。
 
 ## 2. 认证流程
 
@@ -65,7 +91,7 @@ Viewer                                   Host
   │ ◄──AuthResult {ok, enc=true}──────────│
   │ aesKey = HKDF-SHA256(ECDH(client,host),│
   │        salt, info="wsh1-aead")        │ 同左
-  │ （后续 VideoFrame/StatsInfo 负载加密）  │
+  │ （后续 VideoFrame/AudioFrame/StatsInfo 负载加密）  │
 ```
 
 - **防中间人**：认证证明 HMAC 绑定双方 ECDH 公钥与盐，不知道密码无法伪造/替换公钥。
@@ -77,7 +103,7 @@ Viewer                                   Host
 
 - 算法：AES-256-GCM（tag 16B，nonce 12B 随机）。
 - 报文：`[12B nonce][密文][16B tag]`，帧头 Flags.Encrypted=1。
-- 覆盖范围：VideoFrame、StatsInfo 负载；握手消息明文（仅公钥/盐，无敏感数据）。
+- 覆盖范围：VideoFrame、AudioFrame、RawFrame、StatsInfo 负载。握手消息（AuthRequest / AuthChallenge / AuthProof / AuthResult）必须明文——密钥本身就是在握手过程中协商出来的；Ping / Pong / Bye 不含内容，同样明文。
 
 ## 4. 信令服务器协议（SignalR，`/signalr`）
 
@@ -111,7 +137,7 @@ Viewer                                   Host
 
 ## 5. WebRTC 媒体
 
-- 拓扑：Host sendonly ↔ Viewer recvonly，单视频轨。
+- 拓扑：Host sendonly ↔ Viewer recvonly，单视频轨（**不含音频轨**：系统声音只走 LAN TCP 通路，回退到 WebRTC 时只有画面）。
 - 编码：H.264（packetization-mode=1，profile-level-id 42e01f），时钟率 90kHz。
 - 加密：DTLS-SRTP（强制，WebRTC 标准）。
 - ICE：STUN（默认 stun:stun.l.google.com:19302）→ 失败走 TURN（环境变量 WINDOWSHARE_TURN_URL/USER/CRED 或自建 coturn）。
