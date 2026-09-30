@@ -14,7 +14,8 @@ public sealed class EncoderPipeline : IDisposable
 {
     private readonly ID3D11Device _device;
     private readonly GpuVideoProcessor _videoProcessor;
-    private readonly MfH264Encoder _encoder;
+    // 输出尺寸变化时会整体重建（见 UpdateOutputSize），因此不是 readonly
+    private MfH264Encoder _encoder;
     private readonly object _gate = new();
 
     private int _outWidth;      // 当前编码输出宽
@@ -71,18 +72,24 @@ public sealed class EncoderPipeline : IDisposable
         _videoProcessor = new GpuVideoProcessor(_device);
         // 传入共享设备：硬件编码器直接吃 GPU NV12 纹理（零拷贝）
         _encoder = new MfH264Encoder(Settings, _device);
-        _encoder.Encoded += f =>
-        {
-            Interlocked.Increment(ref _encodedFrames);
-            Interlocked.Add(ref _encodedBytes, f.PayloadSize);
-            // 以「实际出帧」为准刷新关键帧时刻（从请求发出到 IDR 落地之间有延迟）
-            if (f.Keyframe)
-                Interlocked.Exchange(ref _lastKeyFrameQpc, System.Diagnostics.Stopwatch.GetTimestamp());
-            Encoded?.Invoke(f);
-        };
+        _encoder.Encoded += OnEncoderOutput;
         Logger.Info("Pipeline",
             $"编码管线就绪: {_outWidth}x{_outHeight} @ {Settings.Fps}fps, " +
             $"编码器={EncoderName}, 硬件={IsHardwareEncoder}, 零拷贝={IsZeroCopy}");
+    }
+
+    /// <summary>
+    /// 编码器出帧回调。用命名方法而不是 lambda：分辨率变化重建编码器时需要把旧编码器的
+    /// 事件摘掉，否则它的尾帧会混进新码流（观看端会看到尺寸突变的花屏）。
+    /// </summary>
+    private void OnEncoderOutput(EncodedVideoFrame f)
+    {
+        Interlocked.Increment(ref _encodedFrames);
+        Interlocked.Add(ref _encodedBytes, f.PayloadSize);
+        // 以「实际出帧」为准刷新关键帧时刻（从请求发出到 IDR 落地之间有延迟）
+        if (f.Keyframe)
+            Interlocked.Exchange(ref _lastKeyFrameQpc, System.Diagnostics.Stopwatch.GetTimestamp());
+        Encoded?.Invoke(f);
     }
 
     /// <summary>
@@ -184,10 +191,51 @@ public sealed class EncoderPipeline : IDisposable
     public (long Frames, long Bytes) GetCounters()
         => (Interlocked.Read(ref _encodedFrames), Interlocked.Read(ref _encodedBytes));
 
+    /// <summary>
+    /// 输出尺寸变化（源尺寸变化 / 拥塞降档）：必须重建编码器。
+    ///
+    /// 只改 GPU 侧的目标尺寸是不够的：编码器的输入媒体类型仍声明旧宽高，喂进去的
+    /// NV12 纹理/字节与声明不符会花屏、错位甚至让编码器直接报错；而且每帧的
+    /// EncodedVideoFrame.Width/Height 会一直停在旧值，观看端按旧尺寸建解码器同样解不出来。
+    /// </summary>
     private void UpdateOutputSize(int w, int h)
     {
-        Logger.Info("Pipeline", $"编码分辨率: {_outWidth}x{_outHeight} → {w}x{h}");
+        var settings = Settings with { Width = w, Height = h };
+
+        MfH264Encoder next;
+        try
+        {
+            next = new MfH264Encoder(settings, _device);
+        }
+        catch (Exception ex)
+        {
+            // 没有编码器支持新尺寸：保持原尺寸继续跑，断流比降质更糟
+            Logger.Error("Pipeline", $"编码分辨率切换到 {w}x{h} 失败，保持 {_outWidth}x{_outHeight}", ex);
+            return;
+        }
+
+        var old = _encoder;
+        old.Encoded -= OnEncoderOutput;   // 先摘事件，再换引用
+        next.Encoded += OnEncoderOutput;
+        _encoder = next;
+        Settings = settings;
         (_outWidth, _outHeight) = (w, h);
+        _keyFrameRequestWarned = false;   // 换了编码器，要重新报一次它认不认 ForceKeyFrame
+        _lastAcceptedQpc = 0;             // 重置节流基准，避免重建后的第一帧被误丢
+
+        Logger.Info("Pipeline",
+            $"编码分辨率: → {w}x{h}（编码器已重建: {next.EncoderName}, " +
+            $"硬件={next.IsHardware}, 零拷贝={next.IsD3DAccelerated}）");
+
+        // 旧编码器必须放到后台释放。MfH264Encoder.Dispose 会 Join 事件泵线程，
+        // 而泵线程此刻可能正卡在 ShareSession._gate 上（分发帧给 sink）；本线程又持有
+        // 管线 _gate，同步等待就会与 ShareSession.SetDynamicResolution
+        // （先持 session._gate、再取 pipeline._gate）形成锁环 → 死锁。
+        _ = System.Threading.Tasks.Task.Run(() =>
+        {
+            try { old.Dispose(); }
+            catch (Exception ex) { Logger.Warn("Pipeline", $"旧编码器释放异常: {ex.Message}"); }
+        });
     }
 
     /// <summary>把 CPU BGRA 像素上传到 GPU（复用纹理）</summary>
@@ -277,7 +325,9 @@ public sealed class EncoderPipeline : IDisposable
 
     public void Dispose()
     {
-        _encoder.Dispose();
+        MfH264Encoder encoder;
+        lock (_gate) encoder = _encoder;
+        encoder.Dispose();
         _videoProcessor.Dispose();
         _uploadTexture?.Dispose();
     }
