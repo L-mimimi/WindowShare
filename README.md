@@ -6,23 +6,23 @@ Windows 只读屏幕/窗口共享软件：**Host 端**捕获整个屏幕或指�
 
 ## 下载（Windows x64）
 
-最新版本 **v1.2.0** ｜ [全部发布版本](https://github.com/L-mimimi/WindowShare/releases)
+最新版本 **v1.3.0** ｜ [全部发布版本](https://github.com/L-mimimi/WindowShare/releases)
 
 | 类型 | 文件 | 大小 | 说明 |
 |------|------|------|------|
-| 安装版 | [WindowShare-Setup-1.2.0.exe](https://github.com/L-mimimi/WindowShare/releases/download/v1.2.0/WindowShare-Setup-1.2.0.exe) | 88.0 MB | Inno Setup per-user 安装，**无需管理员权限**；数据写入 `%APPDATA%\WindowShare` |
-| 便携版 | [WindowShare-Portable-1.2.0.zip](https://github.com/L-mimimi/WindowShare/releases/download/v1.2.0/WindowShare-Portable-1.2.0.zip) | 122.2 MB | 解压即用，可放 U 盘；数据全部存于程序目录 `data\` |
+| 安装版 | [WindowShare-Setup-1.3.0.exe](https://github.com/L-mimimi/WindowShare/releases/download/v1.3.0/WindowShare-Setup-1.3.0.exe) | 88.0 MB | Inno Setup per-user 安装，**无需管理员权限**；数据写入 `%APPDATA%\WindowShare` |
+| 便携版 | [WindowShare-Portable-1.3.0.zip](https://github.com/L-mimimi/WindowShare/releases/download/v1.3.0/WindowShare-Portable-1.3.0.zip) | 122.3 MB | 解压即用，可放 U 盘；数据全部存于程序目录 `data\` |
 
 两者均为 self-contained（win-x64），目标机器**无需预装 .NET 运行时**。系统要求：Windows 10 1903（10.0.18362）或更高。
 
 校验（SHA256）：
 
 ```
-d6ca56fd948302390dbb741d5264e16c991a2e2422a9e10c8282e8287d1ead9b  WindowShare-Setup-1.2.0.exe
-683746039a0f53b1f747fdb5065d9a98f617964a6c737c0cf41ae8bdf68bfacf  WindowShare-Portable-1.2.0.zip
+62b8f13f49e5a998953aa4da6918f66efa96c6410bbc96a1acd7804b53355e8c  WindowShare-Setup-1.3.0.exe
+567bd70ef6161e22ec79d7f91607d5c3981587fd85d6f8fdd89174e7fe8bb953  WindowShare-Portable-1.3.0.zip
 ```
 
-## 1.3.0 更新（待发布）
+## 1.3.0 更新
 
 - **局域网自动发现（对标同类产品的设备发现）**：Host 开始共享后每 2 秒向组播组（`239.255.87.83:48751`，TTL=1）广播本机名称与共享端口；Viewer 打开即被动监听，界面自动列出「发现的共享端」，双击填入直连地址。announce 只含设备名与端口（与端口扫描等价的信息），**不含密码/房间号/设备 ID**，接入仍走完整认证握手；组播被网络策略禁掉时自动失效，手输 IP 直连不受影响。可在 Host 界面用「局域网发现」勾选框关闭。
 - **WebRTC 通路补齐系统声音**：广域网/跨网段观看不再"只有画面没声音"。AAC-LC 复用 LAN 通路同一编码器输出，走自定义动态 PT 97（48kHz/立体声）随 DTLS-SRTP 加密传输；旧版观看端（v1.2）协商失败时 Host 自动降级为纯视频 offer 重试，双向兼容。注意：该音频是私有 PT，浏览器无法接收（本就只支持自家 Viewer）。
@@ -30,7 +30,7 @@ d6ca56fd948302390dbb741d5264e16c991a2e2422a9e10c8282e8287d1ead9b  WindowShare-Se
 - **崩溃不再静默**：新增全局异常兜底——UI 线程异常记录后尝试继续运行并提示日志位置，后台线程致命异常与未观察任务异常全部落盘后再退出。
 - **UI 设置持久化**：分辨率 / 帧率 / 共享声音 / 编码验证 / 信令地址 / 上次共享源（Host），连接模式 / IP / 端口 / 房间号 / 信令地址 / 声音开关（Viewer）重启后自动恢复；**密码仍为会话级临时凭据，绝不落盘**。
 - **发送路径零分配 + GPU 资源复用**：每连接复用发送缓冲、AES-GCM 就地加密，消除每秒上百次的帧级大数组分配；WGC 捕获纹理环形池化、软件编码 staging/NV12 缓冲复用、预览三槽轮换；Host/Viewer 启用服务器 GC。整体降低编码/分发链路的 GC 停顿毛刺。
-- **工程化**：新增 GitHub Actions（push/PR 跑构建 + 单测，推 `v*` 标签自动发布安装包 + 便携版 + SHA256）；版本号单源化到 `Directory.Build.props`；补 LICENSE（MIT）与 `.editorconfig`；编译警告清零。
+- **工程化**：新增 GitHub Actions（push/PR 跑构建 + 单测，推 `v*` 标签自动发布安装包 + 便携版 + SHA256）；版本号单源化到 `Directory.Build.props`；补 LICENSE（MIT）与 `.editorconfig`；编译警告清零；安装器中文语言文件随仓库分发（runner 预装的 Inno Setup 不自带）。
 - **测试**：单测 158/158（新增设置持久化 8 项、发现协议 14 项）；冒烟测试 Part6 断言 WebRTC 音频回环、新增 Part8 局域网发现回环，八个部分全部 PASS。
 
 ## 1.2.0 更新
