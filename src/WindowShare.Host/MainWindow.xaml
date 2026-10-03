@@ -63,6 +63,9 @@
                     <Button DockPanel.Dock="Left" x:Name="BtnSignalingRetry" Content="重试" Padding="10,2"
                             Margin="4,0" Click="BtnSignalingRetry_Click" Visibility="Collapsed"
                             ToolTip="重新连接信令服务器并注册房间（不影响正在进行的局域网共享）"/>
+                    <Button DockPanel.Dock="Left" x:Name="BtnSignalingLocal" Content="本机信令：启动" Padding="10,2"
+                            Margin="12,0,0,0" Click="BtnSignalingLocal_Click"
+                            ToolTip="一键启动程序目录自带的本机信令服务器（signaling\WindowShare.Signaling.exe，监听 5000 端口），就绪后自动填入地址并连接。本机做跨网段中转时使用；同一局域网观看不需要它。"/>
                     <CheckBox DockPanel.Dock="Right" x:Name="ChkDiscoverable" Content="局域网发现"
                               VerticalAlignment="Center" Margin="8,0"
                               ToolTip="共享期间向局域网广播本机名称与端口（不含密码），观看端可自动发现并一键直连"

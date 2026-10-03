@@ -56,6 +56,9 @@ public static class AppPaths
     /// <summary>Viewer 端设置文件</summary>
     public static string ViewerSettingsFile => Path.Combine(Config, "viewer-settings.json");
 
+    /// <summary>合并入口的全局设置文件（模式选择）</summary>
+    public static string AppSettingsFile => Path.Combine(Config, "app-settings.json");
+
     static AppPaths()
     {
         var resolved = Resolve(

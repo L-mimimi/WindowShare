@@ -46,9 +46,10 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Source: "{#PublishDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
+Name: "{group}\{#MyAppChineseName}"; Filename: "{app}\WindowShare.exe"; Comment: "窗享合并入口（共享端/观看端二选一）"
 Name: "{group}\{#MyAppChineseName} Host（共享端）"; Filename: "{app}\{#MyAppExeName}"
 Name: "{group}\{#MyAppChineseName} Viewer（观看端）"; Filename: "{app}\WindowShare.Viewer.exe"
-Name: "{autodesktop}\{#MyAppChineseName} Host"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+Name: "{autodesktop}\{#MyAppChineseName}"; Filename: "{app}\WindowShare.exe"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "启动 {#MyAppChineseName}"; Flags: nowait postinstall skipifsilent

@@ -48,6 +48,12 @@ public partial class MainWindow : Window
     private bool _trayBalloonShown;
     /// <summary>LAN 发现信标（共享期间广播本机，随会话启停）</summary>
     private DiscoveryBeacon? _beacon;
+    /// <summary>本机信令服务器子进程（一键启动功能）</summary>
+    private System.Diagnostics.Process? _localSignaling;
+    private static readonly System.Net.Http.HttpClient SignalingHealthClient = new()
+    {
+        Timeout = TimeSpan.FromSeconds(2),
+    };
 
     /// <summary>
     /// 分辨率档位（只定义目标宽度；高度按源宽高比等比推导，最高 4K）。
@@ -535,6 +541,137 @@ public partial class MainWindow : Window
         });
     }
 
+    // ===== 本机信令服务器（一键启动/停止） =====
+
+    private void BtnSignalingLocal_Click(object sender, RoutedEventArgs e)
+    {
+        if (_localSignaling is { HasExited: false })
+        {
+            StopLocalSignaling("手动停止");
+            return;
+        }
+        _ = StartLocalSignalingAsync();
+    }
+
+    /// <summary>定位程序目录自带的信令服务器 exe（便携版/安装版均为 signaling\ 子目录布局）</summary>
+    private static string? FindSignalingExe()
+    {
+        foreach (var root in new[] { AppPaths.GetExeDirectory(), AppContext.BaseDirectory })
+        {
+            var p = Path.Combine(root, "signaling", "WindowShare.Signaling.exe");
+            if (File.Exists(p)) return p;
+        }
+        return null;
+    }
+
+    /// <summary>探测本机 5000 端口是否已在跑「我们的」信令服务器</summary>
+    private static async System.Threading.Tasks.Task<bool> IsOurSignalingUpAsync()
+    {
+        try
+        {
+            var body = await SignalingHealthClient.GetStringAsync("http://localhost:5000/");
+            return body.Contains("WindowShare Signaling");
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private async System.Threading.Tasks.Task StartLocalSignalingAsync()
+    {
+        try
+        {
+            // 已经有我们的信令在跑（上次未关 / 另一窗口启动的）→ 直接接管状态
+            if (await IsOurSignalingUpAsync())
+            {
+                MarkLocalSignalingRunning(null);
+                return;
+            }
+
+            var exe = FindSignalingExe();
+            if (exe == null)
+            {
+                MessageBox.Show(this,
+                    "未找到信令服务器程序（signaling\\WindowShare.Signaling.exe）。\n便携版与安装版默认自带该目录。",
+                    "提示", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            BtnSignalingLocal.Content = "启动中…";
+            BtnSignalingLocal.IsEnabled = false;
+            var psi = new System.Diagnostics.ProcessStartInfo(exe, "--urls http://0.0.0.0:5000")
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                WorkingDirectory = Path.GetDirectoryName(exe)!,
+            };
+            var proc = System.Diagnostics.Process.Start(psi);
+
+            for (var i = 0; i < 24 && (proc == null || !proc.HasExited); i++)
+            {
+                await System.Threading.Tasks.Task.Delay(500);
+                if (await IsOurSignalingUpAsync())
+                {
+                    MarkLocalSignalingRunning(proc);
+                    return;
+                }
+            }
+
+            ResetLocalSignalingButton();
+            MessageBox.Show(this,
+                "信令服务器 12 秒内未就绪（5000 端口可能被其他程序占用）。\n详见日志，或手动运行 signaling\\WindowShare.Signaling.exe 查看报错。",
+                "启动失败", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+        catch (Exception ex)
+        {
+            ResetLocalSignalingButton();
+            Logger.Error("Host", "本机信令服务器启动失败", ex);
+            MessageBox.Show(this, $"本机信令服务器启动失败：{ex.Message}", "错误",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private void MarkLocalSignalingRunning(System.Diagnostics.Process? proc)
+    {
+        _localSignaling = proc;
+        if (proc != null)
+        {
+            proc.EnableRaisingEvents = true;
+            proc.Exited += (_, _) => Dispatcher.BeginInvoke(() =>
+            {
+                _localSignaling = null;
+                ResetLocalSignalingButton();
+                Logger.Info("Host", "本机信令服务器进程已退出");
+            });
+        }
+        BtnSignalingLocal.Content = "本机信令：停止";
+        BtnSignalingLocal.IsEnabled = true;
+        TxtSignalingUrl.Text = "http://localhost:5000";
+        if (ChkSignaling.IsChecked != true)
+            ChkSignaling.IsChecked = true;   // 触发既有流程：共享中立即连接，否则提示开始共享后连接
+        Logger.Info("Host", "本机信令服务器已就绪（http://localhost:5000）");
+    }
+
+    private void StopLocalSignaling(string reason)
+    {
+        var proc = _localSignaling;
+        _localSignaling = null;
+        if (proc is { HasExited: false })
+        {
+            try { proc.Kill(entireProcessTree: true); }
+            catch (Exception ex) { Logger.Warn("Host", $"停止信令进程失败: {ex.Message}"); }
+        }
+        ResetLocalSignalingButton();
+        Logger.Info("Host", $"本机信令服务器已停止（{reason}）");
+    }
+
+    private void ResetLocalSignalingButton()
+    {
+        BtnSignalingLocal.Content = "本机信令：启动";
+        BtnSignalingLocal.IsEnabled = true;
+    }
+
     /// <summary>信令中继消息处理：观看者跨网段时发起 WebRTC（SDP/ICE 中继）</summary>
     private async void OnRelayFromViewer(string? viewerId, string type, string payload)
     {
@@ -805,6 +942,7 @@ public partial class MainWindow : Window
 
         _tray?.Dispose();
         _tray = null;
+        StopLocalSignaling("窗口关闭");
         if (_session is { IsSharing: true })
             StopSharing("窗口关闭");
         _overlay?.Close();

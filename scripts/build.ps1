@@ -86,7 +86,7 @@ Write-Host "[3/5] dotnet publish ..." -ForegroundColor Yellow
 $pubRoot = Join-Path $root "dist\publish"
 if (Test-Path $pubRoot) { Remove-Item $pubRoot -Recurse -Force }
 
-$projects = @("src/WindowShare.Host", "src/WindowShare.Viewer")
+$projects = @("src/WindowShare.Host", "src/WindowShare.Viewer", "src/WindowShare.App")
 foreach ($p in $projects) {
     & $dotnet publish $p -c Release -r win-x64 --self-contained true -o $pubRoot /p:PublishSingleFile=false -m:1
     if ($LASTEXITCODE -ne 0) { throw "发布失败: $p" }
@@ -165,6 +165,7 @@ New-Item -ItemType Directory -Force -Path (Join-Path $portableApp "data\config")
 New-Item -ItemType Directory -Force -Path (Join-Path $portableApp "data\recordings") | Out-Null
 
 # 启动脚本与说明
+Copy-Item (Join-Path $root "scripts\portable\启动-窗享.bat") $portableApp -Force
 Copy-Item (Join-Path $root "scripts\portable\启动-共享端.bat") $portableApp -Force
 Copy-Item (Join-Path $root "scripts\portable\启动-观看端.bat") $portableApp -Force
 Copy-Item (Join-Path $root "scripts\portable\启动-信令服务器.bat") $portableApp -Force

@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- 合并入口：单 exe 双模式（共享端/观看端），按启动参数或模式选择窗分发 -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <RootNamespace>WindowShare.App</RootNamespace>
+    <AssemblyName>WindowShare</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>../../assets/windowshare.ico</ApplicationIcon>
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\WindowShare.Core\WindowShare.Core.csproj" />
+    <ProjectReference Include="..\WindowShare.Host\WindowShare.Host.csproj" />
+    <ProjectReference Include="..\WindowShare.Viewer\WindowShare.Viewer.csproj" />
+  </ItemGroup>
+
+</Project>

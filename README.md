@@ -22,7 +22,13 @@ Windows 只读屏幕/窗口共享软件：**Host 端**捕获整个屏幕或指�
 2de22d81089fc54eb6e0ed6bb2ff828b9b51adcad91babd9a31de2e671313bc7  WindowShare-Portable-1.3.1.zip
 ```
 
+## 1.3.2 更新（待发布）
+
+- **Host / Viewer 合并入口**：新增 `WindowShare.exe`（单 exe 二合一），启动弹出模式选择窗，可勾选「记住选择」；命令行 `--host` / `--viewer` 直接进入指定模式，`--select` 重新弹出选择窗。原 `WindowShare.Host.exe` / `WindowShare.Viewer.exe` 保留，安装器与便携版同时提供「窗享」合并入口快捷方式/启动脚本。
+- **Host 一键启动本机信令服务器**：信令行新增「本机信令：启动」按钮——自动启动程序目录自带的 `signaling\WindowShare.Signaling.exe`（隐藏窗口、监听 5000），就绪后自动填入 `http://localhost:5000` 并勾选信令连接；再次点击停止，主窗口关闭时随进程一并退出。同一局域网观看用不到它，跨网段自建中转时不再需要手动开命令行。
+
 ## 1.3.1 更新
+
 
 - **修复启动崩溃（重要）**：v1.3.0 的 Host 在启动时可能抛 `NullReferenceException`，窗口无法显示（异常被全局兜底吞掉后进程残留）。原因：XAML 解析到 `ChkAudio IsChecked="True"` 时触发 `Setting_Changed` → `SaveSettings()`，而此时后声明的控件尚未创建。现在设置保存统一等到构造函数完成后才生效。Viewer 无此问题。建议 1.3.0 用户直接升级；残留的无窗口进程可在任务管理器结束 `WindowShare.Host.exe`。
 

@@ -1,0 +1,36 @@
+<Window x:Class="WindowShare.App.ModeSelectWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="窗享 WindowShare"
+        Width="480" Height="380"
+        WindowStartupLocation="CenterScreen"
+        ResizeMode="NoResize"
+        WindowStyle="SingleBorderWindow">
+    <StackPanel Margin="24,18">
+        <TextBlock Text="窗享 WindowShare" FontSize="22" FontWeight="Bold"
+                   HorizontalAlignment="Center"/>
+        <TextBlock Text="只读屏幕/窗口共享 · 无远程控制功能" Foreground="#666"
+                   HorizontalAlignment="Center" Margin="0,6,0,20"/>
+
+        <Button x:Name="BtnHost" Height="66" Click="BtnHost_Click">
+            <StackPanel Orientation="Horizontal">
+                <TextBlock Text="共享端（Host）" FontSize="17" FontWeight="Bold" VerticalAlignment="Center"/>
+                <TextBlock Text="　捕获本机屏幕或窗口，共享给他人" Foreground="#666" VerticalAlignment="Center"/>
+            </StackPanel>
+        </Button>
+
+        <Button x:Name="BtnViewer" Height="66" Margin="0,10,0,0" Click="BtnViewer_Click">
+            <StackPanel Orientation="Horizontal">
+                <TextBlock Text="观看端（Viewer）" FontSize="17" FontWeight="Bold" VerticalAlignment="Center"/>
+                <TextBlock Text="　连接 Host，接收画面与声音" Foreground="#666" VerticalAlignment="Center"/>
+            </StackPanel>
+        </Button>
+
+        <CheckBox x:Name="ChkRemember" Content="记住选择，下次直接进入"
+                  HorizontalAlignment="Center" Margin="0,18,0,0"/>
+
+        <TextBlock Text="命令行：WindowShare.exe --host / --viewer 可直接进入指定模式；--select 重新弹出本窗口"
+                   Foreground="#999" FontSize="11" TextWrapping="Wrap"
+                   HorizontalAlignment="Center" Margin="0,14,0,0"/>
+    </StackPanel>
+</Window>
