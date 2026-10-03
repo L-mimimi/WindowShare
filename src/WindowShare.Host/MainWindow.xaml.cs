@@ -81,6 +81,7 @@ public partial class MainWindow : Window
             _infoTimer.Stop();
             Logger.LogEmitted -= OnLogEmitted;
         };
+        _uiReady = true;   // XAML 加载完毕，之后控件事件才允许写设置
     }
 
     /// <summary>窗口句柄就绪后挂托盘图标；菜单动作统一回 UI 线程</summary>
@@ -147,6 +148,11 @@ public partial class MainWindow : Window
 
     /// <summary>恢复默认值过程中触发的「改动」不回写（避免启动时连写多次文件）</summary>
     private bool _restoringSettings;
+    /// <summary>
+    /// XAML 解析期间控件默认值（如 ChkAudio IsChecked="True"）就会触发 Checked 事件，
+    /// 此时后声明的控件（TxtSignalingUrl 等）还是 null——构造完成前一律不保存设置。
+    /// </summary>
+    private bool _uiReady;
 
     /// <summary>把当前 UI 状态写回设置文件（改动即存 + 退出时存）</summary>
     private void SaveSettings()
@@ -171,7 +177,7 @@ public partial class MainWindow : Window
     /// <summary>复选框改动即存（XAML 的 Checked/Unchecked 公用入口）</summary>
     private void Setting_Changed(object sender, RoutedEventArgs e)
     {
-        if (_restoringSettings) return;
+        if (!_uiReady || _restoringSettings) return;
         SaveSettings();
     }
 
