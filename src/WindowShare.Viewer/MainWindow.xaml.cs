@@ -37,6 +37,9 @@ public partial class MainWindow : Window
     private readonly BlockingCollection<DecodedVideoFrame> _presentQueue = new(16);
     private Thread? _presentThread;
     private CancellationTokenSource? _presentCts;
+    private readonly ViewerSettings _settings = ViewerSettings.Load();
+    /// <summary>恢复默认值过程中触发的「改动」不回写（避免启动时连写多次文件）</summary>
+    private bool _restoringSettings;
 
     public MainWindow()
     {
@@ -46,14 +49,47 @@ public partial class MainWindow : Window
         _uiTimer.Start();
         TxtMode.Text = AppPaths.ModeDescription;
         TxtMode.ToolTip = AppPaths.Root;
+        ApplySettings();
         ApplyConnMode();
         Logger.LogEmitted += OnLogEmitted;
+        Closing += (_, _) => SaveSettings();
+    }
+
+    // ===== 设置持久化（连接方式/地址/端口/信令/声音开关，重启后恢复上次配置；密码不落盘）=====
+
+    private void ApplySettings()
+    {
+        _restoringSettings = true;
+        try
+        {
+            RbRoom.IsChecked = _settings.RoomMode;
+            RbDirect.IsChecked = !_settings.RoomMode;
+            TxtHost.Text = string.IsNullOrWhiteSpace(_settings.Host) ? "127.0.0.1" : _settings.Host;
+            TxtPort.Text = _settings.Port is >= 1 and <= 65535 ? _settings.Port.ToString() : "48750";
+            TxtRoom.Text = _settings.Room;
+            TxtSignaling.Text = string.IsNullOrWhiteSpace(_settings.SignalingUrl)
+                ? "http://localhost:5000" : _settings.SignalingUrl;
+            ChkAudioPlay.IsChecked = _settings.PlayAudio;
+        }
+        finally { _restoringSettings = false; }
+    }
+
+    private void SaveSettings()
+    {
+        _settings.RoomMode = RbRoom.IsChecked == true;
+        _settings.Host = TxtHost.Text.Trim();
+        _settings.Port = int.TryParse(TxtPort.Text.Trim(), out var p) ? p : 48750;
+        _settings.Room = TxtRoom.Text.Trim().ToUpperInvariant();
+        _settings.SignalingUrl = TxtSignaling.Text.Trim();
+        _settings.PlayAudio = ChkAudioPlay.IsChecked == true;
+        _settings.Save();
     }
 
     // ===== 连接 =====
 
     private void BtnConnect_Click(object sender, RoutedEventArgs e)
     {
+        SaveSettings();   // 记住本次输入（即使连接失败，地址/端口也保留）
         // 按当前选中的模式分发：两种模式各有独立的密码输入框，互不干扰
         if (RbRoom.IsChecked == true) _ = ConnectRoomFlowAsync();
         else ConnectDirectFlow();
@@ -436,7 +472,11 @@ public partial class MainWindow : Window
     }
 
     /// <summary>切换连接模式：只启用当前模式的输入区，避免往不生效的框里输入</summary>
-    private void ConnMode_Checked(object sender, RoutedEventArgs e) => ApplyConnMode();
+    private void ConnMode_Checked(object sender, RoutedEventArgs e)
+    {
+        ApplyConnMode();
+        if (IsLoaded && !_restoringSettings) SaveSettings();
+    }
 
     private void ApplyConnMode()
     {
@@ -509,6 +549,7 @@ public partial class MainWindow : Window
     private void ChkAudioPlay_Changed(object sender, RoutedEventArgs e)
     {
         if (!IsLoaded) return;
+        if (!_restoringSettings) SaveSettings();
         if (ChkAudioPlay.IsChecked == true) TryStartAudio();
         else StopAudio();
     }

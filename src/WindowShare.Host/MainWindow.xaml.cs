@@ -35,6 +35,7 @@ public partial class MainWindow : Window
     private CaptureSource? _selectedSource;
     private WriteableBitmap? _previewBitmap;
     private readonly DispatcherTimer _infoTimer;
+    private readonly HostSettings _settings = HostSettings.Load();
     /// <summary>信令房间是否已注册成功（与「是否勾选」区分：勾选但未连上时显示重试入口）</summary>
     private bool _signalingReady;
     /// <summary>房间号被占用时的换号重试次数</summary>
@@ -53,17 +54,13 @@ public partial class MainWindow : Window
         ("540p 流畅 (960)", 960),
     };
 
-    private const int DefaultResolutionIndex = 2;   // 1080p
-    private const int DefaultFps = 30;
-
     public MainWindow()
     {
         InitializeComponent();
         InitializeSources();
         CboResolution.ItemsSource = ResolutionPresets.Select(r => r.Name).ToList();
-        CboResolution.SelectedIndex = DefaultResolutionIndex;
         CboFps.ItemsSource = VideoFormatPlanner.FpsTiers.Select(f => $"{f} fps").ToList();
-        CboFps.SelectedIndex = Math.Max(0, Array.IndexOf(VideoFormatPlanner.FpsTiers, DefaultFps));
+        ApplySettings();
         _infoTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
         _infoTimer.Tick += (_, _) => RefreshOutputInfo();
         ShowModeInfo();
@@ -71,9 +68,66 @@ public partial class MainWindow : Window
         Logger.LogEmitted += OnLogEmitted;
         Closing += (_, _) =>
         {
+            SaveSettings();
             _infoTimer.Stop();
             Logger.LogEmitted -= OnLogEmitted;
         };
+    }
+
+    // ===== 设置持久化（分辨率/帧率/开关/信令地址，重启后恢复上次配置）=====
+
+    private void ApplySettings()
+    {
+        _restoringSettings = true;
+        try
+        {
+            CboResolution.SelectedIndex = Math.Clamp(_settings.ResolutionIndex, 0, ResolutionPresets.Length - 1);
+            CboFps.SelectedIndex = Math.Clamp(_settings.FpsIndex, 0, VideoFormatPlanner.FpsTiers.Length - 1);
+            ChkAudio.IsChecked = _settings.ShareAudio;
+            ChkRecord.IsChecked = _settings.RecordForValidation;
+            ChkSignaling.IsChecked = _settings.EnableSignaling;
+            TxtSignalingUrl.Text = string.IsNullOrWhiteSpace(_settings.SignalingUrl)
+                ? "http://localhost:5000" : _settings.SignalingUrl;
+
+            // best-effort 恢复上次共享源：显示器重插/窗口句柄失效时自然找不到，静默跳过
+            if (_settings.LastSourceKind >= 0)
+            {
+                var list = (List<CaptureSource>)CboSources.ItemsSource;
+                var match = list.FirstOrDefault(s =>
+                    (int)s.Kind == _settings.LastSourceKind &&
+                    s.Handle.ToInt64() == _settings.LastSourceHandle);
+                if (match != null) CboSources.SelectedItem = match;
+            }
+        }
+        finally { _restoringSettings = false; }
+    }
+
+    /// <summary>恢复默认值过程中触发的「改动」不回写（避免启动时连写多次文件）</summary>
+    private bool _restoringSettings;
+
+    /// <summary>把当前 UI 状态写回设置文件（改动即存 + 退出时存）</summary>
+    private void SaveSettings()
+    {
+        _settings.ResolutionIndex = Math.Max(0, CboResolution.SelectedIndex);
+        _settings.FpsIndex = Math.Max(0, CboFps.SelectedIndex);
+        _settings.ShareAudio = ChkAudio.IsChecked == true;
+        _settings.RecordForValidation = ChkRecord.IsChecked == true;
+        _settings.EnableSignaling = ChkSignaling.IsChecked == true;
+        _settings.SignalingUrl = TxtSignalingUrl.Text.Trim();
+        var src = _selectedSource ?? GetSelectedSource();
+        if (src != null)
+        {
+            _settings.LastSourceKind = (int)src.Kind;
+            _settings.LastSourceHandle = src.Handle.ToInt64();
+        }
+        _settings.Save();
+    }
+
+    /// <summary>复选框改动即存（XAML 的 Checked/Unchecked 公用入口）</summary>
+    private void Setting_Changed(object sender, RoutedEventArgs e)
+    {
+        if (_restoringSettings) return;
+        SaveSettings();
     }
 
     // ===== 画质档位（分辨率 / 帧率 / 自动码率）=====
@@ -90,12 +144,14 @@ public partial class MainWindow : Window
     {
         if (TxtBitrateHint == null) return;   // InitializeComponent 期间可能早于其他控件
         UpdateBitrateHint();
+        if (!_restoringSettings) SaveSettings();
     }
 
     private void Source_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (TxtBitrateHint == null) return;
         UpdateBitrateHint();
+        if (!_restoringSettings) SaveSettings();
     }
 
     /// <summary>按「所选分辨率 × 帧率 × 源宽高比」推算码率并展示</summary>
@@ -381,6 +437,7 @@ public partial class MainWindow : Window
     private void ChkSignaling_Changed(object sender, RoutedEventArgs e)
     {
         if (TxtSignalingState == null) return;   // InitializeComponent 期间
+        if (!_restoringSettings) SaveSettings();
         if (_session is not { IsSharing: true })
         {
             SetSignalingState(ChkSignaling.IsChecked == true ? "将在开始共享时连接" : "未启用",

@@ -32,9 +32,11 @@
                             Background="#1E88E5" Foreground="White" FontWeight="Bold"
                             Content="开始共享" Click="BtnToggleShare_Click"/>
                     <CheckBox DockPanel.Dock="Right" x:Name="ChkRecord" Content="编码验证(写H.264)"
-                              VerticalAlignment="Center" Margin="8,0"/>
+                              VerticalAlignment="Center" Margin="8,0"
+                              Checked="Setting_Changed" Unchecked="Setting_Changed"/>
                     <CheckBox DockPanel.Dock="Right" x:Name="ChkAudio" Content="共享系统声音" IsChecked="True"
                               VerticalAlignment="Center" Margin="8,0"
+                              Checked="Setting_Changed" Unchecked="Setting_Changed"
                               ToolTip="共享本机正在播放的声音（游戏/视频/音乐/系统提示音），不是麦克风。&#10;开始共享后修改不生效，需停止后重新开始。&#10;没有播放设备或没有 AAC 编码器时会自动降级为纯视频共享。"/>
                 </DockPanel>
 
