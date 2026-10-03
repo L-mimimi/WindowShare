@@ -52,27 +52,12 @@ public sealed class TcpFrameConnection : IDisposable
     public async Task SendAsync(MessageType type, FrameFlags flags, ReadOnlyMemory<byte> payload,
         CancellationToken ct = default)
     {
-        var enc = _encryption;
-        byte[] buffer;
-        if (enc != null && ShouldEncrypt(type))
-        {
-            var cipher = enc.Encrypt(payload.Span);
-            var seq = Interlocked.Increment(ref _sendSeq);
-            buffer = new byte[FrameHeader.HeaderSize + cipher.Length];
-            new FrameHeader(type, flags | FrameFlags.Encrypted, seq, DateTime.UtcNow.Ticks, cipher.Length)
-                .Write(buffer);
-            cipher.CopyTo(buffer.AsMemory(FrameHeader.HeaderSize));
-        }
-        else
-        {
-            var seq = Interlocked.Increment(ref _sendSeq);
-            buffer = FrameHeader.BuildFrame(type, flags, seq, DateTime.UtcNow.Ticks, payload.Span);
-        }
-
         await _sendLock.WaitAsync(ct);
         try
         {
-            await _stream.WriteAsync(buffer, ct);
+            // 组帧与发送同锁：发送缓冲是本连接独占的复用缓冲，串行填充避免撕裂
+            var total = SerializeFrame(type, flags, DateTime.UtcNow.Ticks, payload.Span, out var buffer);
+            await _stream.WriteAsync(buffer.AsMemory(0, total), ct);
             await _stream.FlushAsync(ct);
         }
         finally
@@ -92,11 +77,11 @@ public sealed class TcpFrameConnection : IDisposable
     /// </summary>
     public void Send(MessageType type, FrameFlags flags, long timestampUtc, ReadOnlySpan<byte> payload)
     {
-        var buffer = BuildFrame(type, flags, timestampUtc, payload);
         _sendLock.Wait();
         try
         {
-            _stream.Write(buffer, 0, buffer.Length);
+            var total = SerializeFrame(type, flags, timestampUtc, payload, out var buffer);
+            _stream.Write(buffer, 0, total);
             _stream.Flush();
         }
         finally
@@ -105,24 +90,47 @@ public sealed class TcpFrameConnection : IDisposable
         }
     }
 
+    /// <summary>每连接复用的发送缓冲（发送锁内独占使用；增长留旧）</summary>
+    private byte[] _sendBuffer = new byte[FrameHeader.HeaderSize + AesGcmSession.OverheadSize + 64 * 1024];
+
+    /// <summary>确保发送缓冲容量（只在发送锁内调用）</summary>
+    private byte[] EnsureSendBufferLocked(int total)
+    {
+        if (_sendBuffer.Length >= total) return _sendBuffer;
+        var grown = new byte[Math.Max(total, _sendBuffer.Length * 2)];
+        _sendBuffer = grown;
+        return grown;
+    }
+
     /// <summary>
-    /// 组装待发帧：媒体与统计类消息在会话密钥可用时一律加密。
-    /// 认证握手（AuthRequest/AuthChallenge/AuthProof/AuthResult）必须保持明文——
-    /// 密钥本身就是在握手过程中协商出来的；Ping/Pong/Bye 不含内容，也走明文。
+    /// 把一帧组进复用发送缓冲（必须在发送锁内调用），返回总长度。
+    /// 布局：明文帧 = [头 24][负载]；加密帧 = [头 24][nonce 12][密文 N][tag 16]。
+    /// 组帧与发送同锁消除了每帧两次的大数组分配——这是每秒上百次的帧级 GC 热点。
+    /// 认证握手（Auth*）必须保持明文——密钥本身就是在握手过程中协商出来的；
+    /// Ping/Pong/Bye 不含内容，也走明文。
     /// </summary>
-    private byte[] BuildFrame(MessageType type, FrameFlags flags, long timestampUtc, ReadOnlySpan<byte> payload)
+    private int SerializeFrame(MessageType type, FrameFlags flags, long timestampUtc,
+        ReadOnlySpan<byte> payload, out byte[] buffer)
     {
         var seq = Interlocked.Increment(ref _sendSeq);
         var enc = _encryption;
-        if (enc != null && ShouldEncrypt(type))
+        var encrypted = enc != null && ShouldEncrypt(type);
+        var payloadLen = encrypted ? AesGcmSession.OverheadSize + payload.Length : payload.Length;
+        var total = FrameHeader.HeaderSize + payloadLen;
+        buffer = EnsureSendBufferLocked(total);
+
+        if (encrypted)
         {
-            var cipher = enc.Encrypt(payload);
-            var buffer = new byte[FrameHeader.HeaderSize + cipher.Length];
-            new FrameHeader(type, flags | FrameFlags.Encrypted, seq, timestampUtc, cipher.Length).Write(buffer);
-            cipher.CopyTo(buffer.AsSpan(FrameHeader.HeaderSize));
-            return buffer;
+            payload.CopyTo(buffer.AsSpan(FrameHeader.HeaderSize + AesGcmSession.NonceSize, payload.Length));
+            enc!.EncryptInPlace(buffer.AsSpan(FrameHeader.HeaderSize), payload.Length);
+            new FrameHeader(type, flags | FrameFlags.Encrypted, seq, timestampUtc, payloadLen).Write(buffer);
         }
-        return FrameHeader.BuildFrame(type, flags, seq, timestampUtc, payload);
+        else
+        {
+            new FrameHeader(type, flags, seq, timestampUtc, payload.Length).Write(buffer);
+            payload.CopyTo(buffer.AsSpan(FrameHeader.HeaderSize, payload.Length));
+        }
+        return total;
     }
 
     /// <summary>该类型的负载是否应当加密（内容类消息）</summary>

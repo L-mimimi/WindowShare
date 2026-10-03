@@ -35,11 +35,16 @@ public sealed class EcdhKeyExchange : IDisposable
 /// <summary>
 /// AES-256-GCM 会话加密器。
 /// 报文格式：[12B 随机 nonce][密文][16B tag]（GCM 自带完整性认证）。
+/// 提供两种用法：<see cref="Encrypt"/>（分配式，握手后小消息用）与
+/// <see cref="EncryptInPlace"/>（就地加密，视频/音频每帧大负载走这条路径避免 GC 压力）。
 /// </summary>
 public sealed class AesGcmSession : IDisposable
 {
-    private const int NonceSize = 12;
-    private const int TagSize = 16;
+    public const int NonceSize = 12;
+    public const int TagSize = 16;
+
+    /// <summary>nonce + tag 的总开销（PayloadLength 字段要把它算进帧负载长度）</summary>
+    public static int OverheadSize => NonceSize + TagSize;
 
     private readonly AesGcm _aes;
     private readonly byte[] _key;
@@ -55,13 +60,28 @@ public sealed class AesGcmSession : IDisposable
     /// <summary>加密：返回 nonce+密文+tag</summary>
     public byte[] Encrypt(ReadOnlySpan<byte> plain)
     {
-        var result = new byte[NonceSize + plain.Length + TagSize];
-        var nonce = result.AsSpan(0, NonceSize);
-        RandomNumberGenerator.Fill(nonce);
+        var result = new byte[OverheadSize + plain.Length];
+        RandomNumberGenerator.Fill(result.AsSpan(0, NonceSize));
         var cipher = result.AsSpan(NonceSize, plain.Length);
         var tag = result.AsSpan(^TagSize);
-        _aes.Encrypt(nonce, plain, cipher, tag, associatedData: default);
+        _aes.Encrypt(result.AsSpan(0, NonceSize), plain, cipher, tag, associatedData: default);
         return result;
+    }
+
+    /// <summary>
+    /// 就地加密：workspace 布局须为 [nonce(12)][密文(N)][tag(16)]，N 由调用方传入。
+    /// 负载先由调用方拷入密文段；本方法生成 nonce 后对密文段就地加密并填入 tag。
+    /// 明文与密文为同一段内存，AesGcm 原生支持该种完全重叠的就地加密。
+    /// </summary>
+    public void EncryptInPlace(Span<byte> workspace, int payloadLength)
+    {
+        if (workspace.Length < OverheadSize + payloadLength)
+            throw new ArgumentException("workspace 容量不足", nameof(workspace));
+        var nonce = workspace.Slice(0, NonceSize);
+        RandomNumberGenerator.Fill(nonce);
+        var cipher = workspace.Slice(NonceSize, payloadLength);
+        var tag = workspace.Slice(NonceSize + payloadLength, TagSize);
+        _aes.Encrypt(nonce, cipher, cipher, tag, associatedData: default);
     }
 
     /// <summary>解密：payload 被篡改时抛出 CryptographicException</summary>
