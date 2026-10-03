@@ -72,6 +72,7 @@ public static class Logger
 
     private static void Write(LogLevel level, string category, string message, Exception? ex)
     {
+        Action<LogLevel, DateTime, string>? uiHandlers;
         lock (Gate)
         {
             if (level < _minLevel) return;
@@ -106,9 +107,11 @@ public static class Logger
                 // 日志文件写入失败不影响主流程
             }
 
-            // UI 转发（注意：不要在事件里做重活，由订阅方自行调度到 UI 线程）
-            try { LogEmitted?.Invoke(level, now, $"[{category}] {message}"); } catch { }
+            // 锁内只拷贝委托列表，事件派发放到锁外：
+            // 订阅方（UI 转发）速度不可控，持锁派发会让所有写日志的线程陪等
+            uiHandlers = LogEmitted;
         }
+        try { uiHandlers?.Invoke(level, DateTime.Now, $"[{category}] {message}"); } catch { }
     }
 
     /// <summary>清理 7 天前的日志文件</summary>

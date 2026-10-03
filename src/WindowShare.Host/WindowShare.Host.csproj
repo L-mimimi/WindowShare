@@ -10,6 +10,9 @@
     <AssemblyName>WindowShare.Host</AssemblyName>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>../../assets/windowshare.ico</ApplicationIcon>
+    <!-- 共享端是高吞吐生产者（捕获/编码/分发），服务器 GC 减少 gen2 阻塞毛刺 -->
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
   </PropertyGroup>
 
   <ItemGroup>

@@ -10,6 +10,9 @@
     <AssemblyName>WindowShare.Viewer</AssemblyName>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>../../assets/windowshare.ico</ApplicationIcon>
+    <!-- 解码/渲染同样是高吞吐路径，与 Host 保持一致的 GC 配置 -->
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
   </PropertyGroup>
 
   <ItemGroup>
