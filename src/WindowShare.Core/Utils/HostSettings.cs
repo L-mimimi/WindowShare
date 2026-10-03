@@ -18,6 +18,9 @@ public sealed class HostSettings
 
     public bool EnableSignaling { get; set; }
 
+    /// <summary>共享进行中关闭窗口 → 隐藏到托盘继续共享（关=直接停止共享退出）</summary>
+    public bool MinimizeToTray { get; set; } = true;
+
     public string SignalingUrl { get; set; } = "http://localhost:5000";
 
     /// <summary>上次共享源（best-effort 恢复：源列表里找不到同类型同句柄就不恢复）</summary>

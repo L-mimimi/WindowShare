@@ -9,6 +9,7 @@
     <RootNamespace>WindowShare.Viewer</RootNamespace>
     <AssemblyName>WindowShare.Viewer</AssemblyName>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>../../assets/windowshare.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>

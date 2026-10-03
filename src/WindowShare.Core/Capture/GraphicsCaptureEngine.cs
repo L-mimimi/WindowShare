@@ -127,6 +127,10 @@ public sealed class GraphicsCaptureEngine : ICaptureEngine
     private void OnFrameArrived(Direct3D11CaptureFramePool sender, object? args)
     {
         if (!_running) return;
+        // Stop 置空后事件泵可能还排着一帧，局部快照兜底空引用
+        var item = _item;
+        var pool = _pool;
+        if (item == null || pool == null) return;
         try
         {
             using var frame = sender.TryGetNextFrame();
@@ -134,10 +138,10 @@ public sealed class GraphicsCaptureEngine : ICaptureEngine
 
             // 帧内容尺寸可能变化（窗口/显示器分辨率改变）→ 重建 FramePool
             var size = frame.ContentSize;
-            if (size.Width != _item.Size.Width || size.Height != _item.Size.Height)
+            if (size.Width != item.Size.Width || size.Height != item.Size.Height)
             {
-                Logger.Info("WGC", $"捕获尺寸变化: {_item.Size.Width}x{_item.Size.Height} → {size.Width}x{size.Height}");
-                _pool.Recreate(_winrtDevice, _format, 2, size);
+                Logger.Info("WGC", $"捕获尺寸变化: {item.Size.Width}x{item.Size.Height} → {size.Width}x{size.Height}");
+                pool.Recreate(_winrtDevice, _format, 2, size);
             }
 
             // 零拷贝取出源纹理，再复制到私有纹理（FramePool 需要立即回收其缓冲区）

@@ -40,6 +40,12 @@ public partial class MainWindow : Window
     private bool _signalingReady;
     /// <summary>房间号被占用时的换号重试次数</summary>
     private const int SignalingRegisterRetries = 3;
+    /// <summary>托盘图标（SourceInitialized 后创建，窗口关闭时销毁）</summary>
+    private TrayIcon? _tray;
+    /// <summary>托盘菜单「退出」置位：跳过隐藏到托盘，真正关闭窗口</summary>
+    private bool _forceExit;
+    /// <summary>「关闭窗口但共享继续」的气泡只提示第一次</summary>
+    private bool _trayBalloonShown;
 
     /// <summary>
     /// 分辨率档位（只定义目标宽度；高度按源宽高比等比推导，最高 4K）。
@@ -66,12 +72,45 @@ public partial class MainWindow : Window
         ShowModeInfo();
         UpdateBitrateHint();
         Logger.LogEmitted += OnLogEmitted;
+        SourceInitialized += (_, _) => InitializeTray();
         Closing += (_, _) =>
         {
             SaveSettings();
             _infoTimer.Stop();
             Logger.LogEmitted -= OnLogEmitted;
         };
+    }
+
+    /// <summary>窗口句柄就绪后挂托盘图标；菜单动作统一回 UI 线程</summary>
+    private void InitializeTray()
+    {
+        try
+        {
+            _tray = new TrayIcon(this);
+            _tray.OpenRequested += () => Dispatcher.BeginInvoke(() =>
+            {
+                Show();
+                WindowState = WindowState.Normal;
+                Activate();
+            });
+            _tray.StopShareRequested += () => Dispatcher.BeginInvoke(() =>
+            {
+                if (_session is not { IsSharing: true }) return;
+                StopSharing("托盘停止");
+                Show();
+                WindowState = WindowState.Normal;
+            });
+            _tray.ExitRequested += () => Dispatcher.BeginInvoke(() =>
+            {
+                _forceExit = true;
+                Close();
+            });
+            _tray.Update("窗享 Host — 空闲", sharing: false);
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn("Host", "托盘图标初始化失败（不影响共享功能）: " + ex.Message);
+        }
     }
 
     // ===== 设置持久化（分辨率/帧率/开关/信令地址，重启后恢复上次配置）=====
@@ -86,6 +125,7 @@ public partial class MainWindow : Window
             ChkAudio.IsChecked = _settings.ShareAudio;
             ChkRecord.IsChecked = _settings.RecordForValidation;
             ChkSignaling.IsChecked = _settings.EnableSignaling;
+            ChkMinToTray.IsChecked = _settings.MinimizeToTray;
             TxtSignalingUrl.Text = string.IsNullOrWhiteSpace(_settings.SignalingUrl)
                 ? "http://localhost:5000" : _settings.SignalingUrl;
 
@@ -113,6 +153,7 @@ public partial class MainWindow : Window
         _settings.ShareAudio = ChkAudio.IsChecked == true;
         _settings.RecordForValidation = ChkRecord.IsChecked == true;
         _settings.EnableSignaling = ChkSignaling.IsChecked == true;
+        _settings.MinimizeToTray = ChkMinToTray.IsChecked == true;
         _settings.SignalingUrl = TxtSignalingUrl.Text.Trim();
         var src = _selectedSource ?? GetSelectedSource();
         if (src != null)
@@ -328,6 +369,7 @@ public partial class MainWindow : Window
         ChkAudio.IsEnabled = false;
         _infoTimer.Start();
         RefreshOutputInfo();
+        _tray?.Update("窗享 Host — 共享中", sharing: true);
 
         // 悬浮共享指示条 + 窗口红框（隐私提示）
         _overlay = new OverlayWindow(source, _session);
@@ -640,6 +682,7 @@ public partial class MainWindow : Window
             TxtOutput.Text = "";
             TxtAudio.Text = "";
             ChkAudio.IsEnabled = true;
+            _tray?.Update("窗享 Host — 空闲", sharing: false);
             SetSignalingState(ChkSignaling.IsChecked == true ? "将在开始共享时连接" : "未启用",
                 SignalingUiState.Off);
         });
@@ -697,6 +740,22 @@ public partial class MainWindow : Window
 
     private void Window_Closing(object sender, System.ComponentModel.CancelEventArgs e)
     {
+        // 共享进行中关窗 → 隐藏到托盘继续共享（托盘菜单「退出」才真正关闭）
+        if (_session is { IsSharing: true } && !_forceExit && _settings.MinimizeToTray)
+        {
+            e.Cancel = true;
+            Hide();
+            if (!_trayBalloonShown)
+            {
+                _tray?.ShowBalloon("窗享仍在共享",
+                    "已最小化到通知栏，观看者仍可接入。右键托盘图标可停止共享或退出。");
+                _trayBalloonShown = true;
+            }
+            return;
+        }
+
+        _tray?.Dispose();
+        _tray = null;
         if (_session is { IsSharing: true })
             StopSharing("窗口关闭");
         _overlay?.Close();

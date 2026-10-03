@@ -97,9 +97,9 @@ public sealed class MfH264Decoder : IDisposable
         var p = Marshal.ReadIntPtr(ptrs, 0 * IntPtr.Size);
         var activate = new IMFActivate(p);
         Marshal.FreeCoTaskMem(ptrs);
-        activate.ActivateObject(out IMFTransform transform).CheckError();
+        activate.ActivateObject(out IMFTransform? transform).CheckError();
         activate.Dispose();
-        _transform = transform;
+        _transform = transform ?? throw new InvalidOperationException("H.264 解码器 MFT 激活返回空对象");
 
         // 低延迟解码：MF_LOW_LATENCY 走 MFT 自身的属性存储。
         // 不要用 ICodecAPI 设同名属性——系统 H.264 解码器上会把 CLR 打崩（0x80131506）。

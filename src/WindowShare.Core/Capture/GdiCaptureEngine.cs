@@ -16,7 +16,10 @@ public sealed class GdiCaptureEngine : ICaptureEngine, IFrameRateLimited
     public bool IsRunning => _running;
 
     public event Action<CaptureFrame>? FrameArrived;
+    // GDI 路径不检测系统级停止（接口事件保留，永远不触发）
+    #pragma warning disable CS0067
     public event Action<string>? StoppedBySystem;
+    #pragma warning restore CS0067
 
     private const int PW_CLIENTONLY = 0x01;
     private const int PW_RENDERFULLCONTENT = 0x02;

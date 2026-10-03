@@ -9,10 +9,16 @@
     <RootNamespace>WindowShare.Host</RootNamespace>
     <AssemblyName>WindowShare.Host</AssemblyName>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>../../assets/windowshare.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\WindowShare.Core\WindowShare.Core.csproj" />
+  </ItemGroup>
+
+  <!-- 托盘图标（TrayIcon 从程序集内嵌资源解析，避免 System.Drawing 依赖） -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\..\assets\windowshare.ico" LogicalName="WindowShare.Host.tray.ico" />
   </ItemGroup>
 
 </Project>
