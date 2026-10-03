@@ -33,6 +33,11 @@ public sealed class GraphicsCaptureEngine : ICaptureEngine
     private GraphicsCaptureSession? _session;
     private DirectXPixelFormat _format = DirectXPixelFormat.B8G8R8A8UIntNormalized;
 
+    /// <summary>回收待复用的纹理（消费方 Dispose 帧时归还；尺寸变化/停止时清空销毁）</summary>
+    private readonly Queue<ID3D11Texture2D> _texturePool = new();
+    /// <summary>池上限：捕获→编码→归还的在途窗口通常 ≤2 帧，3 个留余量</summary>
+    private const int MaxPooledTextures = 3;
+
     /// <summary>系统是否支持 WGC</summary>
     public static bool IsAvailable()
     {
@@ -114,6 +119,8 @@ public sealed class GraphicsCaptureEngine : ICaptureEngine
             Logger.Warn("WGC", $"停止捕获异常: {ex.Message}");
         }
         _running = false;
+        // 在途帧归还时会发现 _running=false 而自毁，这里清掉已在池中的
+        DrainTexturePool();
         Logger.Info("WGC", $"捕获已停止（共 {_frameCount} 帧）");
     }
 
@@ -146,24 +153,66 @@ public sealed class GraphicsCaptureEngine : ICaptureEngine
 
             // 零拷贝取出源纹理，再复制到私有纹理（FramePool 需要立即回收其缓冲区）
             using var srcTexture = WgcInterop.GetTextureFromSurface(frame.Surface);
-            using var ownTexture = CreateSameTexture(srcTexture, size.Width, size.Height);
+            var ownTexture = TakePooledTexture(srcTexture, size.Width, size.Height);
             var ctx = _device!.ImmediateContext;
             ctx.CopyResource(ownTexture, srcTexture);
 
             Interlocked.Increment(ref _frameCount);
-            FrameArrived?.Invoke(new CaptureFrame
+            var arrived = new CaptureFrame
             {
                 Width = size.Width,
                 Height = size.Height,
                 TimestampUtc = DateTime.UtcNow.Ticks,
                 QpcTimestamp = System.Diagnostics.Stopwatch.GetTimestamp(),
                 Texture = ownTexture, // 所有权移交消费方
-            });
+            };
+            // 消费方 Dispose 整帧时纹理归还池中（池化对消费方透明）
+            arrived.TextureRelease = () => ReturnPooledTexture(ownTexture);
+            FrameArrived?.Invoke(arrived);
         }
         catch (Exception ex)
         {
             // 单帧失败不中断捕获；连续失败由上层超时机制处理
             Logger.Error("WGC", "处理捕获帧异常", ex);
+        }
+    }
+
+    /// <summary>从池里取同尺寸纹理；没有就新建（回调线程 + 归还线程并发访问，锁保护）</summary>
+    private ID3D11Texture2D TakePooledTexture(ID3D11Texture2D src, int width, int height)
+    {
+        lock (_gate)
+        {
+            while (_texturePool.Count > 0)
+            {
+                var pooled = _texturePool.Dequeue();
+                var d = pooled.Description;
+                if ((int)d.Width == width && (int)d.Height == height) return pooled;
+                pooled.Dispose();   // 尺寸不匹配（刚发生分辨率切换），丢弃
+            }
+        }
+        return CreateSameTexture(src, width, height);
+    }
+
+    /// <summary>归还纹理；池满则销毁（引擎停止后归还也会走这里）</summary>
+    private void ReturnPooledTexture(ID3D11Texture2D texture)
+    {
+        lock (_gate)
+        {
+            if (!_running || _texturePool.Count >= MaxPooledTextures || _device == null)
+            {
+                texture.Dispose();
+                return;
+            }
+            _texturePool.Enqueue(texture);
+        }
+    }
+
+    /// <summary>清空纹理池（持 _gate 调用或停止流程调用）</summary>
+    private void DrainTexturePool()
+    {
+        lock (_gate)
+        {
+            while (_texturePool.Count > 0) _texturePool.Dequeue().Dispose();
         }
     }
 

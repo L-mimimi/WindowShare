@@ -271,53 +271,66 @@ public sealed class EncoderPipeline : IDisposable
         return _uploadTexture;
     }
 
-    /// <summary>把 GPU NV12 纹理拷回 CPU（软件编码器路径）</summary>
+    /// <summary>软件编码器路径的 NV12 staging 纹理（尺寸变化时重建，避免每帧创建）</summary>
+    private ID3D11Texture2D? _nv12Staging;
+    private int _stagingWidth, _stagingHeight;
+    /// <summary>软件编码器路径的 NV12 字节缓冲（_gate 内独占使用，按需增长）</summary>
+    private byte[] _nv12Bytes = Array.Empty<byte>();
+
+    /// <summary>把 GPU NV12 纹理拷回 CPU（软件编码器路径；staging 纹理与输出缓冲均复用）</summary>
     private byte[] CopyTextureToNv12Bytes(ID3D11Texture2D nv12, int width, int height)
     {
-        var staging = _device.CreateTexture2D(new Texture2DDescription
+        if (_nv12Staging == null || _stagingWidth != width || _stagingHeight != height)
         {
-            Width = (uint)width,
-            Height = (uint)height,
-            MipLevels = 1,
-            ArraySize = 1,
-            Format = Format.NV12,
-            SampleDescription = new SampleDescription(1, 0),
-            Usage = ResourceUsage.Staging,
-            CPUAccessFlags = CpuAccessFlags.Read,
-        });
-        using (staging)
-        {
-            var ctx = _device.ImmediateContext;
-            ctx.CopyResource(staging, nv12);
-            ctx.Map(staging, 0, MapMode.Read, Vortice.Direct3D11.MapFlags.None, out var mapped).CheckError();
-            try
+            _nv12Staging?.Dispose();
+            _nv12Staging = _device.CreateTexture2D(new Texture2DDescription
             {
-                var stride = (int)mapped.RowPitch;
-                var result = new byte[width * height * 3 / 2];
-                unsafe
+                Width = (uint)width,
+                Height = (uint)height,
+                MipLevels = 1,
+                ArraySize = 1,
+                Format = Format.NV12,
+                SampleDescription = new SampleDescription(1, 0),
+                Usage = ResourceUsage.Staging,
+                CPUAccessFlags = CpuAccessFlags.Read,
+            });
+            _stagingWidth = width;
+            _stagingHeight = height;
+        }
+        var staging = _nv12Staging;
+
+        var ctx = _device.ImmediateContext;
+        ctx.CopyResource(staging, nv12);
+        ctx.Map(staging, 0, MapMode.Read, Vortice.Direct3D11.MapFlags.None, out var mapped).CheckError();
+        try
+        {
+            var stride = (int)mapped.RowPitch;
+            var total = width * height * 3 / 2;
+            if (_nv12Bytes.Length < total) _nv12Bytes = new byte[total];
+            var result = _nv12Bytes;
+            unsafe
+            {
+                fixed (byte* dst = result)
                 {
-                    fixed (byte* dst = result)
+                    var src = (byte*)mapped.DataPointer;
+                    // Y 平面
+                    Buffer.MemoryCopy(src, dst, (long)height * width, (long)height * width);
+                    // UV 平面（staging 的 rowPitch 可能大于 width，需按行拷贝）
+                    var uvRows = height / 2;
+                    for (var r = 0; r < uvRows; r++)
                     {
-                        var src = (byte*)mapped.DataPointer;
-                        // Y 平面
-                        Buffer.MemoryCopy(src, dst, (long)height * width, (long)height * width);
-                        // UV 平面（staging 的 rowPitch 可能大于 width，需按行拷贝）
-                        var uvRows = height / 2;
-                        for (var r = 0; r < uvRows; r++)
-                        {
-                            Buffer.MemoryCopy(
-                                src + (long)stride * (height + r),
-                                dst + (long)width * height + (long)r * width,
-                                width, width);
-                        }
+                        Buffer.MemoryCopy(
+                            src + (long)stride * (height + r),
+                            dst + (long)width * height + (long)r * width,
+                            width, width);
                     }
                 }
-                return result;
             }
-            finally
-            {
-                ctx.Unmap(staging, 0);
-            }
+            return result;
+        }
+        finally
+        {
+            ctx.Unmap(staging, 0);
         }
     }
 
@@ -330,5 +343,6 @@ public sealed class EncoderPipeline : IDisposable
         encoder.Dispose();
         _videoProcessor.Dispose();
         _uploadTexture?.Dispose();
+        _nv12Staging?.Dispose();
     }
 }

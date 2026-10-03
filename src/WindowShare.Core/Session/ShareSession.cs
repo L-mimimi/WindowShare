@@ -79,6 +79,13 @@ public sealed class ShareSession : IDisposable
     private AudioPipeline? _audio;
     private readonly List<IFrameSink> _sinks = new();
     private ID3D11Texture2D? _previewStaging;
+    /// <summary>
+    /// 预览缓冲三槽轮换：1080p 一帧 8MB、30fps 即 ~240MB/s 的分配率。
+    /// UI 线程通常在下一帧到来前就消费完（WritePixels 同步拷贝）；极端卡顿时
+    /// 最坏看到一帧撕裂，仅影响本机预览观感——换算成收益是预览路径零 GC 压力。
+    /// </summary>
+    private readonly byte[][] _previewBuffers = new byte[3][];
+    private int _previewBufferIndex;
     private long _lastPreviewQpc;
     private long _startTicks;
     /// <summary>预览节流间隔（约 30fps）</summary>
@@ -443,7 +450,13 @@ public sealed class ShareSession : IDisposable
                 Vortice.Direct3D11.MapFlags.None, out var mapped).CheckError();
             try
             {
-                var bgra = new byte[w * h * 4];
+                var bgra = _previewBuffers[_previewBufferIndex];
+                if (bgra == null || bgra.Length != w * h * 4)
+                {
+                    bgra = new byte[w * h * 4];
+                    _previewBuffers[_previewBufferIndex] = bgra;
+                }
+                _previewBufferIndex = (_previewBufferIndex + 1) % _previewBuffers.Length;
                 unsafe
                 {
                     fixed (byte* dst = bgra)

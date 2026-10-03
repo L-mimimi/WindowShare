@@ -28,9 +28,19 @@ public sealed class CaptureFrame : IDisposable
     /// <summary>是否 GPU 纹理帧</summary>
     public bool IsGpu => Texture != null;
 
+    /// <summary>
+    /// 纹理归还回调（池化引擎设置）：Dispose 时归还纹理而不是销毁。
+    /// WGC 引擎用小环形池复用纹理，避免每帧 CreateTexture2D 的 GPU 资源创建开销；
+    /// 消费方仍按约定 Dispose 整帧，无感知池化。
+    /// </summary>
+    internal Action? TextureRelease { get; set; }
+
     public void Dispose()
     {
-        Texture?.Dispose();
+        var release = TextureRelease;
+        TextureRelease = null;
+        if (release != null) release();
+        else Texture?.Dispose();
     }
 }
 
