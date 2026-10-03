@@ -63,6 +63,10 @@
                     <Button DockPanel.Dock="Left" x:Name="BtnSignalingRetry" Content="重试" Padding="10,2"
                             Margin="4,0" Click="BtnSignalingRetry_Click" Visibility="Collapsed"
                             ToolTip="重新连接信令服务器并注册房间（不影响正在进行的局域网共享）"/>
+                    <CheckBox DockPanel.Dock="Right" x:Name="ChkDiscoverable" Content="局域网发现"
+                              VerticalAlignment="Center" Margin="8,0"
+                              ToolTip="共享期间向局域网广播本机名称与端口（不含密码），观看端可自动发现并一键直连"
+                              Checked="Setting_Changed" Unchecked="Setting_Changed"/>
                     <CheckBox DockPanel.Dock="Right" x:Name="ChkMinToTray" Content="关闭时隐藏到托盘"
                               VerticalAlignment="Center" Margin="8,0"
                               ToolTip="共享进行中点关闭按钮 → 隐藏到通知栏继续共享；不勾选则直接停止共享"

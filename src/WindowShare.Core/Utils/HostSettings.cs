@@ -21,6 +21,9 @@ public sealed class HostSettings
     /// <summary>共享进行中关闭窗口 → 隐藏到托盘继续共享（关=直接停止共享退出）</summary>
     public bool MinimizeToTray { get; set; } = true;
 
+    /// <summary>共享期间广播 LAN 发现信标（Viewer 可自动看到本机；不含任何密钥）</summary>
+    public bool Discoverable { get; set; } = true;
+
     public string SignalingUrl { get; set; } = "http://localhost:5000";
 
     /// <summary>上次共享源（best-effort 恢复：源列表里找不到同类型同句柄就不恢复）</summary>

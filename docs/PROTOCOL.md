@@ -142,3 +142,21 @@ Viewer                                   Host
 - 加密：DTLS-SRTP（强制，WebRTC 标准）。
 - ICE：STUN（默认 stun:stun.l.google.com:19302）→ 失败走 TURN（环境变量 WINDOWSHARE_TURN_URL/USER/CRED 或自建 coturn）。
 - UI 状态：根据候选类型（host/srflx=直连，relay=中继）显示。
+
+## 6. 局域网发现（UDP 组播）
+
+Host 共享期间周期广播，Viewer 被动监听即可发现同网段的共享端。
+
+- 组播组 `239.255.87.83`，端口 `48751`（UDP，组织本地范围），TTL=1 不出网段，开启回环（同机多端可自见）。
+- 广播间隔 2 秒；Viewer 侧条目 6 秒未见刷新即判过期。
+- 报文格式：`magic(5B) 'WSH1D'` + `version(1B)` + `JSON(UTF-8)`，单包负载上限 512 字节，超限/魔数/版本不符一律丢弃。
+
+```json
+{ "name": "办公室-DESKTOP", "port": 48750 }
+```
+
+- `name`：Host 机器名（≤64 字符）；`port`：LAN TCP 共享端口（非法值回退 48750）。
+- 安全边界：announce 只暴露「该机正在共享、TCP 端口是多少」——与端口扫描等价的信息；
+  **不含密码、房间号、设备 ID**，接入仍须通过完整的三步握手认证（第 2 节）。
+- 可用性：组播被 AP 隔离/组播路由禁用时发现自动失效，不影响手输 IP 直连；
+  首次监听时 Windows 防火墙可能弹窗，需允许（安装器为 per-user 安装，不预置防火墙规则）。

@@ -43,4 +43,30 @@ public static class LocalEndpoints
         }
         return result;
     }
+
+    /// <summary>
+    /// 枚举本机所有 Up 接口的 IPv4 单播地址（含回环，用于逐接口加入组播组）。
+    /// 个别接口不支持组播时由调用方逐个 try/catch 跳过。
+    /// </summary>
+    public static List<IPAddress> GetLocalIPv4Addresses()
+    {
+        var result = new List<IPAddress>();
+        try
+        {
+            foreach (var ni in NetworkInterface.GetAllNetworkInterfaces())
+            {
+                if (ni.OperationalStatus != OperationalStatus.Up) continue;
+                foreach (var addr in ni.GetIPProperties().UnicastAddresses)
+                {
+                    if (addr.Address.AddressFamily != AddressFamily.InterNetwork) continue;
+                    if (!result.Contains(addr.Address)) result.Add(addr.Address);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Logging.Logger.Warn("Net", "枚举本机 IPv4 地址失败: " + ex.Message);
+        }
+        return result;
+    }
 }

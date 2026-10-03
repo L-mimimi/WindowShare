@@ -40,6 +40,10 @@ public partial class MainWindow : Window
     private readonly ViewerSettings _settings = ViewerSettings.Load();
     /// <summary>恢复默认值过程中触发的「改动」不回写（避免启动时连写多次文件）</summary>
     private bool _restoringSettings;
+    /// <summary>LAN 发现监听器（启动即监听，退出时停）</summary>
+    private readonly DiscoveryListener _discovery = new();
+    /// <summary>发现列表快照（按 Index 取回完整条目用）</summary>
+    private IReadOnlyList<DiscoveredHost> _discovered = new List<DiscoveredHost>();
 
     public MainWindow()
     {
@@ -52,7 +56,63 @@ public partial class MainWindow : Window
         ApplySettings();
         ApplyConnMode();
         Logger.LogEmitted += OnLogEmitted;
-        Closing += (_, _) => SaveSettings();
+        StartDiscovery();
+        Closing += (_, _) =>
+        {
+            SaveSettings();
+            _discovery.Stop();
+        };
+    }
+
+    // ===== 局域网发现（Host 开了信标就自动列出，双击直连）=====
+
+    private void StartDiscovery()
+    {
+        try
+        {
+            _discovery.Start();
+            _uiTimer.Tick += (_, _) => RefreshDiscoveryList();
+            RefreshDiscoveryList();
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn("Viewer", "局域网发现启动失败（不影响手动直连）: " + ex.Message);
+        }
+    }
+
+    /// <summary>把发现表刷进列表；不可用或无结果时隐藏整块，不占界面</summary>
+    private void RefreshDiscoveryList()
+    {
+        var hosts = _discovery.Snapshot();
+        _discovered = hosts;
+        Dispatcher.BeginInvoke(() =>
+        {
+            if (hosts.Count == 0)
+            {
+                PanelDiscovery.Visibility = Visibility.Collapsed;
+                TxtDiscovery.Text = "";
+                return;
+            }
+            PanelDiscovery.Visibility = Visibility.Visible;
+            TxtDiscovery.Text = $"已发现 {hosts.Count} 台";
+            var selected = LstDiscovered.SelectedIndex;
+            LstDiscovered.ItemsSource = hosts
+                .Select(h => $"{h.Name}  —  {h.Address}:{h.Port}")
+                .ToList();
+            if (selected >= 0 && selected < hosts.Count) LstDiscovered.SelectedIndex = selected;
+        });
+    }
+
+    /// <summary>双击发现的共享端 → 填入直连地址并立即连接（密码仍需手输，绝不走发现通道）</summary>
+    private void LstDiscovered_DoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        var index = LstDiscovered.SelectedIndex;
+        if (index < 0 || index >= _discovered.Count) return;
+        var host = _discovered[index];
+        RbDirect.IsChecked = true;
+        TxtHost.Text = host.Address;
+        TxtPort.Text = host.Port.ToString();
+        TxtPwd.Focus();
     }
 
     // ===== 设置持久化（连接方式/地址/端口/信令/声音开关，重启后恢复上次配置；密码不落盘）=====

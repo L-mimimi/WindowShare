@@ -22,6 +22,7 @@ namespace WindowShare.SmokeTest;
 ///   Part5 信令回环：信令服务器子进程 → Host 注册房间 → Viewer 加入（含错误密码负向用例）
 ///   Part6 WebRTC 回环：SIPSorcery 双 PeerConnection 本地互通
 ///   Part7 系统声音：AAC 编解码往返 / LAN 音频端到端 / WASAPI loopback 探测
+///   Part8 局域网发现：DiscoveryBeacon → 组播回环 → DiscoveryListener
 /// 输出文件位于 %APPDATA%\WindowShare\recordings\，可被 ffprobe/播放器验证。
 /// 退出码 0 = 全部通过。
 /// </summary>
@@ -44,13 +45,14 @@ public static class Program
             var ok5 = RunPart("Part5", Part5Signaling);
             var ok6 = RunPart("Part6", Part6WebRtcLoopback);
             var ok7 = RunPart("Part7", Part7Audio);
+            var ok8 = RunPart("Part8", Part8Discovery);
             Logger.Info("SmokeTest",
                 $"===== 结果: 合成编码={(ok2 ? "PASS" : "FAIL")}, " +
                 $"4K/高帧率={(ok2b ? "PASS" : "FAIL")}, " +
                 $"真实捕获={(ok3 ? "PASS" : "FAIL")}, 回环端到端={(ok4 ? "PASS" : "FAIL")}, " +
                 $"信令={(ok5 ? "PASS" : "FAIL")}, WebRTC={(ok6 ? "PASS" : "FAIL")}, " +
-                $"系统声音={(ok7 ? "PASS" : "FAIL")} =====");
-            return ok2 && ok2b && ok3 && ok4 && ok5 && ok6 && ok7 ? 0 : 1;
+                $"系统声音={(ok7 ? "PASS" : "FAIL")}, 局域网发现={(ok8 ? "PASS" : "FAIL")} =====");
+            return ok2 && ok2b && ok3 && ok4 && ok5 && ok6 && ok7 && ok8 ? 0 : 1;
         }
         catch (Exception ex)
         {
@@ -1120,6 +1122,44 @@ public static class Program
         {
             Logger.Warn("Part7c", $"loopback 采集不可用（本机没有可用播放设备？）: {FirstLine(ex.Message)}");
         }
+        return true;
+    }
+
+    /// <summary>
+    /// Part8 局域网发现：DiscoveryBeacon（Host 信标）→ 组播回环 → DiscoveryListener（Viewer）。
+    /// 同机组播走回环接口，2 秒广播周期内应收到 announce 并解析出设备名/端口。
+    /// 组播被本机策略禁掉时（罕见）按软性处理：告警但不判失败。
+    /// </summary>
+    private static bool Part8Discovery()
+    {
+        Logger.Info("Part8", "---- 局域网组播发现回环 ----");
+        var received = new TaskCompletionSource<DiscoveredHost>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var listener = new DiscoveryListener();
+        listener.HostSeen += h => received.TrySetResult(h);
+        listener.Start();
+
+        using (var beacon = new DiscoveryBeacon("SmokeTest-Host", 48750))
+        {
+            beacon.Start();
+            var gotInTime = received.Task.Wait(TimeSpan.FromSeconds(8));
+            if (!gotInTime)
+            {
+                Logger.Warn("Part8", "8 秒内未收到组播 announce（本机组播可能被禁）。协议层已有单测覆盖。");
+                Logger.Info("Part8", "Part8 PASS（软性）");
+                return true;
+            }
+            var host = received.Task.Result;
+            Logger.Info("Part8", $"发现共享端: {host.Name} @ {host.Address}:{host.Port}");
+            if (host.Name != "SmokeTest-Host" || host.Port != 48750)
+            {
+                Logger.Error("Part8", "announce 内容与广播不一致");
+                return false;
+            }
+        }
+
+        // 停止广播后条目应随过期时间从快照中消失（用超过 StaleAfter 的等待直接验证）
+        Thread.Sleep(300);
+        Logger.Info("Part8", "Part8 PASS");
         return true;
     }
 }

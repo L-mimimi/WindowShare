@@ -30,7 +30,24 @@
                     <TextBox DockPanel.Dock="Left" x:Name="TxtPort" Width="70" Margin="4" Text="48750"/>
                     <TextBlock DockPanel.Dock="Left" Text="密码：" VerticalAlignment="Center" Margin="8,0,0,0"/>
                     <PasswordBox DockPanel.Dock="Left" x:Name="TxtPwd" Width="130" Margin="4"/>
+                    <TextBlock DockPanel.Dock="Left" x:Name="TxtDiscovery" Text="" Foreground="#43A047"
+                               VerticalAlignment="Center" Margin="12,0,0,0"/>
                 </DockPanel>
+
+                <!-- 局域网发现的共享端（双击填入直连地址；发现不可用/无结果时整块隐藏） -->
+                <StackPanel x:Name="PanelDiscovery" Orientation="Horizontal" Margin="0,6,0,0"
+                            Visibility="Collapsed">
+                    <TextBlock Text="发现的共享端（双击连接）：" VerticalAlignment="Center" Foreground="#666"/>
+                    <ListBox x:Name="LstDiscovered" Width="520" Height="52" Margin="6,0,0,0"
+                             MouseDoubleClick="LstDiscovered_DoubleClick"
+                             ScrollViewer.HorizontalScrollBarVisibility="Auto">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <TextBlock Text="{Binding}" VerticalAlignment="Center"/>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                </StackPanel>
 
                 <!-- 房间号模式：房间号 + 密码 + 信令服务器 -->
                 <DockPanel x:Name="PanelRoom" LastChildFill="False" Margin="0,8,0,0" IsEnabled="False">

@@ -46,6 +46,8 @@ public partial class MainWindow : Window
     private bool _forceExit;
     /// <summary>「关闭窗口但共享继续」的气泡只提示第一次</summary>
     private bool _trayBalloonShown;
+    /// <summary>LAN 发现信标（共享期间广播本机，随会话启停）</summary>
+    private DiscoveryBeacon? _beacon;
 
     /// <summary>
     /// 分辨率档位（只定义目标宽度；高度按源宽高比等比推导，最高 4K）。
@@ -126,6 +128,7 @@ public partial class MainWindow : Window
             ChkRecord.IsChecked = _settings.RecordForValidation;
             ChkSignaling.IsChecked = _settings.EnableSignaling;
             ChkMinToTray.IsChecked = _settings.MinimizeToTray;
+            ChkDiscoverable.IsChecked = _settings.Discoverable;
             TxtSignalingUrl.Text = string.IsNullOrWhiteSpace(_settings.SignalingUrl)
                 ? "http://localhost:5000" : _settings.SignalingUrl;
 
@@ -154,6 +157,7 @@ public partial class MainWindow : Window
         _settings.RecordForValidation = ChkRecord.IsChecked == true;
         _settings.EnableSignaling = ChkSignaling.IsChecked == true;
         _settings.MinimizeToTray = ChkMinToTray.IsChecked == true;
+        _settings.Discoverable = ChkDiscoverable.IsChecked == true;
         _settings.SignalingUrl = TxtSignalingUrl.Text.Trim();
         var src = _selectedSource ?? GetSelectedSource();
         if (src != null)
@@ -346,6 +350,11 @@ public partial class MainWindow : Window
         {
             _session.Start(source, options);
             _server.Start();
+            if (_settings.Discoverable)
+            {
+                _beacon = new DiscoveryBeacon(AppPaths.GetMachineName(), LanShareServer.DefaultPort);
+                _beacon.Start();
+            }
         }
         catch (Exception ex)
         {
@@ -650,6 +659,8 @@ public partial class MainWindow : Window
         _whitelist = null;
         _preApprovedDevices.Clear();
         _infoTimer.Stop();
+        _beacon?.Stop();
+        _beacon = null;
 
         if (_webRtcSink != null)
         {
