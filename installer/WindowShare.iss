@@ -35,7 +35,8 @@ PrivilegesRequired=lowest
 UninstallDisplayIcon={app}\WindowShare.Host.exe
 
 [Languages]
-Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
+; 语言文件随仓库分发（相对 .iss 目录）：GitHub runner 预装的 Inno Setup 不带中文翻译
+Name: "chinesesimplified"; MessagesFile: "ChineseSimplified.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
