@@ -43,6 +43,8 @@ dotnet run --project tools/WindowShare.SmokeTest
 | Part5 | 信令服务器回环（含错误密码负向用例） | 错误密码被拒、审批通过、取到 LAN 端点 |
 | Part6 | WebRTC 回环（DTLS-SRTP + H.264 RTP，GDI 定速捕获） | 连接成功、收帧 ≥30、解码帧数 ≥ 投喂帧数的 90% |
 | Part7 | 系统声音：**7a** AAC 编解码往返（合成双声道正弦波 → AAC → 解回 PCM）、**7b** LAN 音频端到端（ShareSession → LanShareServer → LanShareClient → 解码）、**7c** WASAPI loopback 探测 | 7a：ADTS 头全部自描述且与帧长一致、时间戳严格递增、解回帧数 ≥ 输入的 85%、格式不符 0 块、RMS ∈ (0.05, 0.9)、左右声道过零比 ∈ (0.35, 0.70)（期望 ≈0.5，可抓住声道交换/被下混/重采样系数写错）；7b：加密开启、会话音频参数与约定一致、收帧 ≥50、ADTS 头非法 0、时间戳乱序 0、解码异常 0、解码块数 ≥ 收帧数的 80%；7c 为软性探测，不计入 Part7 通过条件 |
+| Part6（音频） | WebRTC 音频回环：合成音频走 AAC 动态 PT 97 → RTP/DTLS-SRTP → 裸 AAC 包回 ADTS → MF 解码 | 音频帧 ≥50、解码帧数 ≥ 收帧数的 90%（与视频断言合并为 Part6 通过条件；本机无 AAC 编码器时软性跳过） |
+| Part8 | 局域网组播发现回环：DiscoveryBeacon → 组播（本机走回环接口）→ DiscoveryListener | 8 秒内收到 announce 且设备名/端口与广播一致；本机组播被禁时按软性处理（协议层由单测覆盖） |
 
 产物：`%APPDATA%\WindowShare\recordings\smoke-*.h264`，可用 ffprobe 验证：
 

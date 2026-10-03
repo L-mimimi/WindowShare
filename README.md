@@ -22,7 +22,19 @@ d6ca56fd948302390dbb741d5264e16c991a2e2422a9e10c8282e8287d1ead9b  WindowShare-Se
 683746039a0f53b1f747fdb5065d9a98f617964a6c737c0cf41ae8bdf68bfacf  WindowShare-Portable-1.2.0.zip
 ```
 
+## 1.3.0 更新（待发布）
+
+- **局域网自动发现（对标同类产品的设备发现）**：Host 开始共享后每 2 秒向组播组（`239.255.87.83:48751`，TTL=1）广播本机名称与共享端口；Viewer 打开即被动监听，界面自动列出「发现的共享端」，双击填入直连地址。announce 只含设备名与端口（与端口扫描等价的信息），**不含密码/房间号/设备 ID**，接入仍走完整认证握手；组播被网络策略禁掉时自动失效，手输 IP 直连不受影响。可在 Host 界面用「局域网发现」勾选框关闭。
+- **WebRTC 通路补齐系统声音**：广域网/跨网段观看不再"只有画面没声音"。AAC-LC 复用 LAN 通路同一编码器输出，走自定义动态 PT 97（48kHz/立体声）随 DTLS-SRTP 加密传输；旧版观看端（v1.2）协商失败时 Host 自动降级为纯视频 offer 重试，双向兼容。注意：该音频是私有 PT，浏览器无法接收（本就只支持自家 Viewer）。
+- **托盘与最小化到托盘**：新增应用图标（蓝底屏幕 + 投射波纹）；共享进行中点关闭按钮默认**隐藏到通知栏继续共享**（气泡提示一次），托盘菜单可打开主窗口 / 停止共享 / 退出；不希望该行为可在界面取消「关闭时隐藏到托盘」。
+- **崩溃不再静默**：新增全局异常兜底——UI 线程异常记录后尝试继续运行并提示日志位置，后台线程致命异常与未观察任务异常全部落盘后再退出。
+- **UI 设置持久化**：分辨率 / 帧率 / 共享声音 / 编码验证 / 信令地址 / 上次共享源（Host），连接模式 / IP / 端口 / 房间号 / 信令地址 / 声音开关（Viewer）重启后自动恢复；**密码仍为会话级临时凭据，绝不落盘**。
+- **发送路径零分配 + GPU 资源复用**：每连接复用发送缓冲、AES-GCM 就地加密，消除每秒上百次的帧级大数组分配；WGC 捕获纹理环形池化、软件编码 staging/NV12 缓冲复用、预览三槽轮换；Host/Viewer 启用服务器 GC。整体降低编码/分发链路的 GC 停顿毛刺。
+- **工程化**：新增 GitHub Actions（push/PR 跑构建 + 单测，推 `v*` 标签自动发布安装包 + 便携版 + SHA256）；版本号单源化到 `Directory.Build.props`；补 LICENSE（MIT）与 `.editorconfig`；编译警告清零。
+- **测试**：单测 158/158（新增设置持久化 8 项、发现协议 14 项）；冒烟测试 Part6 断言 WebRTC 音频回环、新增 Part8 局域网发现回环，八个部分全部 PASS。
+
 ## 1.2.0 更新
+
 
 - **系统声音共享（Host → Viewer，单向）**：Host 端勾上「共享系统声音」后，用 WASAPI loopback（事件模式）采集**默认播放设备正在播的内容**（游戏 / 视频 / 音乐 / 系统提示音，**不是麦克风**），重混重采样为 48 kHz 立体声 int16，经 `Microsoft AAC Audio Encoder MFT` 编成 AAC-LC（ADTS 封装、128 kbps），与画面走**同一条 TCP 通道、同一把 AES-256-GCM 会话密钥**（新增消息类型 `AudioFrame = 22`）。Viewer 端由 `Microsoft AAC Audio Decoder MFT` 解回 PCM，经 WASAPI 共享模式渲染。没有播放设备 / 没有 AAC 编解码 MFT / 启动异常时一律静默降级为纯视频共享，不弹窗打断观看。
 - **音画同步以音频时钟为主**：音频帧头带的是**采集时刻**时间戳（不是发送时刻，中间隔着编码与队列等待），Viewer 用它推进同步时钟；解码后的视频帧只入队，由独立上屏线程「等到点再画」。没有声音时（Host 未共享 / Viewer 取消勾选 / 本机无播放设备）自动退回「解码完立即上屏」，延迟更低。
@@ -54,11 +66,14 @@ d6ca56fd948302390dbb741d5264e16c991a2e2422a9e10c8282e8287d1ead9b  WindowShare-Se
 | 2 | H.264 编码（硬件优先）+ 写本地文件验证 | `Core/Encoding`、Host 界面「编码验证」勾选 |
 | 3 | 局域网 TCP 传输，Viewer 解码显示，实时状态/码率/帧率/延迟 | `Core/Network`、`Viewer` 状态栏 |
 | 4 | SignalR 信令：房间号 + 临时密码 + 设备上线 | `Signaling`、`Core/Signaling` |
-| 5 | WebRTC 广域网，STUN 穿透失败走 TURN，显示直连/中继 | `Core/WebRtc` |
+| 5 | WebRTC 广域网（含系统声音，AAC 走动态 PT 97），STUN 穿透失败走 TURN，显示直连/中继 | `Core/WebRtc` |
 | 6 | 安全与隐私：临时密码、设备白名单审批、AES-256-GCM 会话加密、DTLS-SRTP、共享悬浮提示、一键停止、仅共享指定窗口 | `Core/Security`、`Host/OverlayWindow`、`Host/ApprovalDialog` |
 | 7 | 性能：硬件编码、GPU 零拷贝、动态码率、动态分辨率、断线重连 | `Core/Network/CongestionController`、`Core/Encoding/MfH264Encoder` |
 | 8 | 系统声音共享：WASAPI loopback 采集 → AAC-LC(ADTS) → 同一条加密通道 → Viewer 解码播放，音画以音频时钟对齐 | `Core/Audio`、Host「共享系统声音」、Viewer「播放系统声音」 |
 | 9 | 打包为 Windows 安装程序 | `installer/WindowShare.iss`、`scripts/build.ps1` |
+| 10 | 局域网自动发现：Host 组播信标，Viewer 自动列出共享端双击直连（可关） | `Core/Network/LanDiscovery` |
+| 11 | 托盘：共享中关闭窗口隐藏到通知栏继续共享，托盘菜单停止/退出 | `Host/TrayIcon` |
+| 12 | UI 设置持久化与全局异常兜底、CI 自动发布 | `Core/Utils/JsonSettingsStore`、`Core/Logging/CrashReporter`、`.github/workflows` |
 
 ## 项目结构
 
@@ -219,6 +234,7 @@ ffprobe -f h264 "%APPDATA%\WindowShare\recordings\share-*.h264"
 - **一键停止**：悬浮条按钮 / 主界面按钮 / 关闭窗口，三种方式立即断流并通知所有观看者
 - **仅共享指定窗口**：窗口捕获只取该窗口内容，窗口之外的桌面不会被编码进视频流
 - **信令**：服务器只中继 SDP/ICE，不接触媒体；密码哈希比较使用常量时间算法
+- **发现信标不含任何密钥**：组播 announce 只暴露「正在共享 + TCP 端口」，接入仍须通过完整的三步握手认证
 
 ## 已知限制
 
@@ -226,7 +242,8 @@ ffprobe -f h264 "%APPDATA%\WindowShare\recordings\share-*.h264"
 - 局域网传输为 TCP（不做 UDP，优先保证可靠性与可运行性）
 - 信令房间表为内存态，进程重启后房间失效（临时房间语义）
 - DXGI Desktop Duplication 回退仅支持整屏（窗口捕获使用 WGC 或 GDI）
-- WebRTC 媒体为单视频轨 H.264，**不带声音**：系统声音目前只走局域网 TCP 通路，房间号模式回退到 WebRTC 时只有画面
+- WebRTC 音频走自定义动态 PT（AAC），仅 WindowShare 对 WindowShare 互通，浏览器无法接收（本就只支持自家 Viewer）
+- 局域网发现依赖组播：AP 隔离 / 禁组播的网络下自动失效（手输 IP 直连不受影响）；首次监听时 Windows 防火墙可能弹窗，需允许（per-user 安装不预置防火墙规则）
 - 系统声音依赖本机存在可用的播放设备与 AAC 编/解码 MFT；任一缺失即自动降级为纯视频共享（只记日志，不弹窗）
 - 系统声音固定 48 kHz / 立体声 / AAC-LC 128 kbps，采集对象跟随「默认播放设备」，共享过程中切换默认设备需重新开始共享
 
