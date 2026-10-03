@@ -22,8 +22,6 @@ public sealed class WebRtcViewerReceiver : IAsyncDisposable
     /// <summary>连接状态变化（detail：直连/中继）</summary>
     public event Action<string>? StateChanged;
 
-    public event Action<double>? RttUpdated;
-
     public bool IsConnected { get; private set; }
     public bool UsedRelay { get; private set; }
 

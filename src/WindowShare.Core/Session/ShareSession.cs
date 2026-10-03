@@ -77,7 +77,6 @@ public sealed class ShareSession : IDisposable
     private EncoderPipeline? _pipeline;
     private H264FileWriter? _fileWriter;
     private AudioPipeline? _audio;
-    private GpuVideoProcessor? _previewConverter;
     private readonly List<IFrameSink> _sinks = new();
     private ID3D11Texture2D? _previewStaging;
     private long _lastPreviewQpc;
