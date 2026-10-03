@@ -526,20 +526,21 @@ public static class Program
 
     /// <summary>
     /// WebRTC 回环测试：WebRtcHostSender + WebRtcViewerReceiver 在本机 ICE 直连
-    /// （DTLS-SRTP + H.264 RTP 打包/重组），ShareSession 真实编码 → 发送 → 解码出画面。
+    /// （DTLS-SRTP + H.264 RTP 打包/重组 + AAC 音频 RTP），ShareSession 真实编码 → 发送 → 解码出画面。
     /// </summary>
     private static bool Part6WebRtcLoopback()
     {
-        Logger.Info("Part6", "---- WebRTC 回环验证（DTLS-SRTP + H.264 RTP，8 秒）----");
+        Logger.Info("Part6", "---- WebRTC 回环验证（DTLS-SRTP + H.264/AAC RTP，8 秒）----");
         var primary = CaptureSourceList.GetMonitors().FirstOrDefault(m => m.IsPrimary);
         if (primary == null) { Logger.Error("Part6", "找不到主显示器"); return false; }
 
         var session = new ShareSession();
-        var sender = new WebRtcHostSender();
-        var receiver = new WebRtcViewerReceiver();
+        var sender = new WebRtcHostSender(includeAudio: true);
+        var receiver = new WebRtcViewerReceiver(includeAudio: true);
         var decoder = new MfH264Decoder();
+        var aacDecoder = new MfAacDecoder(AudioStreamInfo.SampleRate);
 
-        long received = 0, decoded = 0;
+        long received = 0, decoded = 0, audioReceived = 0, audioDecoded = 0;
         var connected = new ManualResetEventSlim(false);
 
         // ICE 候选互通
@@ -575,6 +576,20 @@ public static class Program
             }
             catch (ObjectDisposedException) { /* 关闭竞态，忽略 */ }
         };
+        // 音频：裸 AAC 包回 ADTS → 解码（验证 RTP 音频通路端到端可用）
+        receiver.AudioFrameReceived += (payload, ts) =>
+        {
+            Interlocked.Increment(ref audioReceived);
+            try
+            {
+                aacDecoder.Decode(Adts.Wrap(payload, AudioStreamInfo.SampleRate, AudioStreamInfo.Channels), ts);
+                Interlocked.Increment(ref audioDecoded);
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn("Part6", "音频解码异常: " + ex.Message);
+            }
+        };
         decoder.Decoded += _ => Interlocked.Increment(ref decoded);
         receiver.StateChanged += s =>
         {
@@ -589,11 +604,15 @@ public static class Program
             var answer = receiver.AcceptOfferAsync(offer).GetAwaiter().GetResult();
             sender.SetAnswer(answer);
 
-            // 启动共享（编码帧 → WebRTC 发送）
+            // 启动共享（编码帧 → WebRTC 发送），另起线程注入合成音频
             var sink = new LocalSink(frame =>
             {
                 if (sender.IsConnected)
                     sender.SendEncodedFrame(frame, 30);
+            }, frame =>
+            {
+                if (sender.IsConnected)
+                    sender.SendAudioFrame(frame);
             });
             session.AddSink(sink);
             session.Start(primary, new ShareOptions
@@ -601,6 +620,19 @@ public static class Program
                 Width = 1280, Fps = 30, BitrateBps = 2_500_000, RecordForValidation = false,
                 CaptureEngine = CaptureEnginePreference.Gdi,   // 定速捕获，避免静态桌面下 WGC 几乎不出帧
             });
+            using var injectCts = new CancellationTokenSource();
+            var audioAvailable = true;
+            MfAacEncoder? audioEncoder = null;
+            try
+            {
+                audioEncoder = new MfAacEncoder();   // 同步创建：没有编码器立刻走软性降级
+                _ = Task.Run(() => InjectSyntheticAudio(audioEncoder, sender.SendAudioFrame, injectCts.Token));
+            }
+            catch (Exception ex)
+            {
+                audioAvailable = false;   // 本机没有 AAC 编码器：音频断言跳过（Part7a 已覆盖该场景）
+                Logger.Warn("Part6", "无 AAC 编码器，跳过音频断言: " + ex.Message);
+            }
 
             var ok = connected.Wait(TimeSpan.FromSeconds(20));
             if (ok)
@@ -608,20 +640,26 @@ public static class Program
                 session.RequestKeyframe();   // 接入即出 IDR，不等 GOP 周期
                 Thread.Sleep(6000);          // 收 6 秒流
             }
+            injectCts.Cancel();
 
             // 先定格投喂计数，再抽干解码器内部滞留的尾部帧，最后读解码结果
             var decodeInvocations = Volatile.Read(ref decodeCalls);
             var receivedFrames = Interlocked.Read(ref received);
             var flushed = decoder.Flush();
             var decodedFrames = Interlocked.Read(ref decoded);
+            var audioFrames = Interlocked.Read(ref audioReceived);
+            var audioOk = Interlocked.Read(ref audioDecoded);
             Logger.Info("Part6", $"Decode 调用 {decodeInvocations} 次; 连接={ok}, 接收={receivedFrames} 帧, " +
                                 $"解码={decodedFrames} 帧（含抽干 {flushed}）, " +
                                 $"投喂={decoder.InputFrames}, 输出样本={decoder.OutputSamples}, " +
                                 $"分辨率未知丢弃={decoder.DroppedUnknownSize}, 缓冲不足丢弃={decoder.DroppedShortBuffer}, " +
+                                $"音频帧={audioFrames}, 音频解码={audioOk}, " +
                                 $"中继={sender.UsedRelay || receiver.UsedRelay}");
             // 比例断言：首个 IDR 之前的帧按设计被跳过（不计入解码），绝对阈值会随机器负载抖动
             var pass = ok && receivedFrames >= 30 && decodeInvocations >= 20 &&
-                       decodedFrames >= decodeInvocations * 9 / 10;
+                       decodedFrames >= decodeInvocations * 9 / 10 &&
+                       (!audioAvailable || audioFrames >= 50) &&
+                       (!audioAvailable || audioOk >= audioFrames * 9 / 10);
             Logger.Info("Part6", pass ? "Part6 PASS" : "Part6 FAIL");
             return pass;
         }
@@ -641,11 +679,14 @@ public static class Program
     }
 
     /// <summary>简单帧转发 sink</summary>
-    private sealed class LocalSink(Action<EncodedVideoFrame> onFrame) : ShareSession.IFrameSink
+    private sealed class LocalSink(
+        Action<EncodedVideoFrame> onFrame,
+        Action<EncodedAudioFrame>? onAudio = null) : ShareSession.IFrameSink, ShareSession.IAudioSink
     {
         public string Name => "webrtc-loopback";
         public void OnEncodedFrame(EncodedVideoFrame frame) => onFrame(frame);
         public void OnShareStopped(string reason) { }
+        public void OnAudioFrame(EncodedAudioFrame frame) => onAudio?.Invoke(frame);
     }
 
     /// <summary>
@@ -1024,7 +1065,11 @@ public static class Program
             if (!loopbackOk)
             {
                 injectCts = new CancellationTokenSource();
-                injectTask = Task.Run(() => InjectSyntheticAudio(server, injectCts.Token));
+                injectTask = Task.Run(() =>
+                {
+                    using var enc = new MfAacEncoder();
+                    InjectSyntheticAudio(enc, server.OnAudioFrame, injectCts.Token);
+                });
             }
             Thread.Sleep(6000);   // 收 6 秒音频流（约 280 个 AAC 帧）
         }
@@ -1067,12 +1112,12 @@ public static class Program
     /// loopback 不可用时的替身：合成 PCM → AAC → 直接交给服务器分发。
     /// 走的是与真实采集完全相同的编码器和发送路径，只是声音来源换成了合成正弦波。
     /// </summary>
-    private static void InjectSyntheticAudio(LanShareServer server, CancellationToken ct)
+    /// <summary>往给定音频出口注入 440Hz 正弦合成音频（20ms/块）。编码器由调用方创建并负责释放。</summary>
+    private static void InjectSyntheticAudio(MfAacEncoder encoder, Action<EncodedAudioFrame> onFrame, CancellationToken ct)
     {
-        using var encoder = new MfAacEncoder();
         encoder.Encoded += f =>
         {
-            try { server.OnAudioFrame(f); } catch { /* 客户端已断开，忽略 */ }
+            try { onFrame(f); } catch { /* 接收端已断开，忽略 */ }
         };
         var pcm = new short[AudioStreamInfo.ChunkFrames * AudioStreamInfo.Channels];
         var startTicks = DateTime.UtcNow.Ticks;

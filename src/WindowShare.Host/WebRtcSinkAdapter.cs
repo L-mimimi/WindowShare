@@ -9,8 +9,9 @@ namespace WindowShare.Host;
 /// WebRTC 发送器的会话 sink 适配器：共享会话 → WebRTC 发送（仅连接后发送）。
 /// Host 关闭共享时 OnShareStopped 会关闭发送器。
 /// 连接刚建立时先补发缓存的 GOP（自上一个 IDR 起），观看者不必黑屏等下一个关键帧。
+/// 同时实现 <see cref="ShareSession.IAudioSink"/>：Host 带音频轨时系统声音随 WebRTC 一起送出。
 /// </summary>
-public sealed class WebRtcSinkAdapter : ShareSession.IFrameSink
+public sealed class WebRtcSinkAdapter : ShareSession.IFrameSink, ShareSession.IAudioSink
 {
     private readonly WebRtcHostSender _sender;
     private readonly int _fps;
@@ -61,4 +62,7 @@ public sealed class WebRtcSinkAdapter : ShareSession.IFrameSink
     {
         _ = _sender.DisposeAsync();
     }
+
+    /// <summary>音频帧直发（发送端内部处理连接状态与降级判定）</summary>
+    public void OnAudioFrame(Core.Audio.EncodedAudioFrame frame) => _sender.SendAudioFrame(frame);
 }

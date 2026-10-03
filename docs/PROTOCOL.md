@@ -137,8 +137,12 @@ Viewer                                   Host
 
 ## 5. WebRTC 媒体
 
-- 拓扑：Host sendonly ↔ Viewer recvonly，单视频轨（**不含音频轨**：系统声音只走 LAN TCP 通路，回退到 WebRTC 时只有画面）。
-- 编码：H.264（packetization-mode=1，profile-level-id 42e01f），时钟率 90kHz。
+- 拓扑：Host sendonly ↔ Viewer recvonly，视频 + 可选音频双轨。
+- 视频编码：H.264（packetization-mode=1，profile-level-id 42e01f），时钟率 90kHz，动态 PT 96。
+- 音频编码：AAC-LC（与 LAN 通路同一编码器输出），动态 **PT 97**、RTP 时钟率 48kHz、双声道。
+  两端都是 WindowShare 对 WindowShare，无需浏览器互通；RTP 负载为裸 AAC 帧（剥掉 ADTS 头），
+  接收端按协商参数自行包回 ADTS 后解码。旧版观看端（v1.2）对带音频轨的 offer 协商失败时，
+  Host 自动降级为纯视频 offer 重试一次。
 - 加密：DTLS-SRTP（强制，WebRTC 标准）。
 - ICE：STUN（默认 stun:stun.l.google.com:19302）→ 失败走 TURN（环境变量 WINDOWSHARE_TURN_URL/USER/CRED 或自建 coturn）。
 - UI 状态：根据候选类型（host/srflx=直连，relay=中继）显示。

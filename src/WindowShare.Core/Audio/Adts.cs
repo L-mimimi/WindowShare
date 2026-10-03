@@ -107,6 +107,16 @@ public static class Adts
     }
 
     /// <summary>
+    /// 剥掉 ADTS 头，返回裸 AAC 负载（RTP 传输不需要头；无有效头时原样返回，容错处理）。
+    /// </summary>
+    public static byte[] Strip(ReadOnlySpan<byte> adts)
+    {
+        if (TryReadHeader(adts, out var frameLength, out _, out _) && frameLength > HeaderLength)
+            return adts.Slice(HeaderLength, frameLength - HeaderLength).ToArray();
+        return adts.ToArray();
+    }
+
+    /// <summary>
     /// 解析 ADTS 头。返回 false 表示同步字/字段非法（数据损坏或不是 ADTS），调用方应丢弃该包。
     /// </summary>
     public static bool TryReadHeader(ReadOnlySpan<byte> data, out int frameLength, out int sampleRate, out int channels)

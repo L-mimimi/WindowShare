@@ -346,21 +346,34 @@ public partial class MainWindow : Window
     {
         TeardownVideoOnly();
 
-        _webRtcReceiver = new WebRtcViewerReceiver();
-        _webRtcReceiver.FrameReceived += (data, ts) => OnEncodedBytes(data, ts);
-        _webRtcReceiver.LocalIceCandidate += c =>
-            _ = signaling.RelayToHostAsync(room, "ice", c);
-        _webRtcReceiver.StateChanged += s => Dispatcher.BeginInvoke(() =>
-        {
-            TxtTransport.Text = _webRtcReceiver?.UsedRelay == true ? "传输：WebRTC 中继(TURN)" : "传输：WebRTC 直连(P2P)";
-        });
+        _webRtcReceiver = CreateWebRtcReceiver(signaling, room);
 
         // 请求 Host 创建 offer
         await signaling.RelayToHostAsync(room, "webrtc-request", "");
         Logger.Info("Viewer", "已请求 WebRTC 接入");
     }
 
-    /// <summary>Host 中继消息处理：offer/ice</summary>
+    /// <summary>统一创建 WebRTC 接收器（视频 + 音频回调 + ICE/状态中继）</summary>
+    private WebRtcViewerReceiver CreateWebRtcReceiver(ViewerSignalingClient signaling, string room)
+    {
+        var receiver = new WebRtcViewerReceiver(includeAudio: true);
+        receiver.FrameReceived += (data, ts) => OnEncodedBytes(data, ts);
+        receiver.AudioFrameReceived += (payload, _) => OnWebRtcAudioFrame(payload);
+        receiver.LocalIceCandidate += c =>
+            _ = signaling.RelayToHostAsync(room, "ice", c);
+        receiver.StateChanged += s => Dispatcher.BeginInvoke(() =>
+        {
+            TxtTransport.Text = _webRtcReceiver?.UsedRelay == true ? "传输：WebRTC 中继(TURN)" : "传输：WebRTC 直连(P2P)";
+            // WebRTC 通路接通且协商到音频轨 → 起播声音（音频参数固定 48kHz/立体声）
+            if (_webRtcReceiver is { IsConnected: true, AudioNegotiated: true })
+                TryStartAudio();
+        });
+        return receiver;
+    }
+
+    /// <summary>
+    /// Host 中继消息处理：offer/ice
+    /// </summary>
     private async void OnRelayFromHost(ViewerSignalingClient signaling, string room, string type, string payload)
     {
         try
@@ -370,10 +383,7 @@ public partial class MainWindow : Window
                 case "offer":
                     if (_webRtcReceiver == null)
                     {
-                        _webRtcReceiver = new WebRtcViewerReceiver();
-                        _webRtcReceiver.FrameReceived += (data, ts) => OnEncodedBytes(data, ts);
-                        _webRtcReceiver.LocalIceCandidate += c =>
-                            _ = signaling.RelayToHostAsync(room, "ice", c);
+                        _webRtcReceiver = CreateWebRtcReceiver(signaling, room);
                     }
                     var answer = await _webRtcReceiver.AcceptOfferAsync(payload);
                     await signaling.RelayToHostAsync(room, "answer", answer);
@@ -569,18 +579,34 @@ public partial class MainWindow : Window
     private void TryStartAudio()
     {
         var client = _client;
-        if (client == null || !client.Audio.Enabled) { UpdateAudioStatus(); return; }
+        if (client is { Audio.Enabled: true })
+        {
+            EnsureAudioPipeline(client.Audio.SampleRate);
+            return;
+        }
+        // LAN 客户端不在（WebRTC 路径）：协商到音频轨就起播
+        if (_client == null && _webRtcReceiver is { IsConnected: true, AudioNegotiated: true })
+        {
+            EnsureAudioPipeline(AudioStreamInfo.SampleRate);
+            return;
+        }
+        UpdateAudioStatus();
+    }
+
+    /// <summary>创建并启动播放管线（采样率取决于通路；LAN/WebRTC 现在同为 48kHz）</summary>
+    private void EnsureAudioPipeline(int sampleRate)
+    {
         if (ChkAudioPlay.IsChecked != true) { UpdateAudioStatus(); return; }
         if (_audio != null) { UpdateAudioStatus(); return; }
 
         try
         {
-            var pipeline = new AudioPlaybackPipeline(client.Audio.SampleRate);
+            var pipeline = new AudioPlaybackPipeline(sampleRate);
             pipeline.Start();
             _audio = pipeline;
             Logger.Info("Viewer",
-                $"系统声音播放已启动: {pipeline.DecoderName}, " +
-                $"{client.Audio.SampleRate}Hz/{client.Audio.Channels}ch {client.Audio.Codec}");
+                $"系统声音播放已启动: {pipeline.DecoderName}, {sampleRate}Hz/{AudioStreamInfo.Channels}ch " +
+                $"(通路: {(_client != null ? "LAN TCP" : "WebRTC")})");
         }
         catch (Exception ex)
         {
@@ -588,6 +614,22 @@ public partial class MainWindow : Window
             Logger.Warn("Viewer", $"音频播放启动失败，本次只看画面: {ex.Message}");
         }
         UpdateAudioStatus();
+    }
+
+    /// <summary>WebRTC 音频帧：裸 AAC 包回 ADTS 后进播放管线（时间戳用到达时刻，抖动缓冲消化网络波动）</summary>
+    private void OnWebRtcAudioFrame(byte[] rawAac)
+    {
+        var audio = _audio;
+        if (audio == null) return;
+        try
+        {
+            var adts = Adts.Wrap(rawAac, AudioStreamInfo.SampleRate, AudioStreamInfo.Channels);
+            audio.Feed(new EncodedAudioFrame { Data = adts, TimestampUtc = DateTime.UtcNow.Ticks });
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn("Viewer", "WebRTC 音频处理异常: " + ex.Message);
+        }
     }
 
     /// <summary>停止声音播放（取消勾选 / 断开连接）。同时清空同步时钟，视频退回「解码完立即上屏」。</summary>
@@ -621,10 +663,14 @@ public partial class MainWindow : Window
     {
         if (TxtAudio == null) return;
         var audio = _audio;
-        if (_client?.Audio.Enabled != true)
+        var audioEnabled = _client?.Audio.Enabled == true ||
+                           _webRtcReceiver is { IsConnected: true, AudioNegotiated: true };
+        if (!audioEnabled)
         {
             TxtAudio.Text = "声音：Host 未共享";
-            TxtAudio.ToolTip = "Host 端勾选「共享系统声音」后重新开始共享，这里才会有声音";
+            TxtAudio.ToolTip = _client != null
+                ? "Host 端勾选「共享系统声音」后重新开始共享，这里才会有声音"
+                : "Host 端 v1.3+ 且勾选了「共享系统声音」时，WebRTC 观看才有声音";
             return;
         }
         if (audio == null)

@@ -6,8 +6,11 @@ namespace WindowShare.Core.WebRtc;
 
 /// <summary>
 /// WebRTC 观看端接收器（SIPSorcery，DTLS-SRTP 加密）：
-///   - recvonly H.264 轨道；ICE/STUN/TURN 与发送端对称；
-///   - 收到重构后的 H.264 帧（Annex-B）经 <see cref="FrameReceived"/> 回调给解码器。
+///   - recvonly H.264 轨道；可选 recvonly AAC 音频轨道（动态 PT 与 Host 侧一致）；
+///   - ICE/STUN/TURN 与发送端对称；
+///   - 收到重构后的 H.264 帧（Annex-B）经 <see cref="FrameReceived"/> 回调给解码器；
+///   - 音频 RTP 包经 <see cref="AudioFrameReceived"/> 上抛（AAC 单帧远小于 MTU，不会分片，
+///     payload 即一帧裸 AAC，调用方自行包回 ADTS 供解码器使用）。
 /// </summary>
 public sealed class WebRtcViewerReceiver : IAsyncDisposable
 {
@@ -19,13 +22,19 @@ public sealed class WebRtcViewerReceiver : IAsyncDisposable
     /// <summary>收到一帧 H.264</summary>
     public event Action<byte[], long>? FrameReceived;
 
+    /// <summary>收到一帧裸 AAC 音频（参数：负载、RTP 时间戳）</summary>
+    public event Action<byte[], uint>? AudioFrameReceived;
+
     /// <summary>连接状态变化（detail：直连/中继）</summary>
     public event Action<string>? StateChanged;
 
     public bool IsConnected { get; private set; }
     public bool UsedRelay { get; private set; }
 
-    public WebRtcViewerReceiver()
+    /// <summary>协商结果是否包含音频轨（旧版 Host 不带音频时为 false）</summary>
+    public bool AudioNegotiated { get; private set; }
+
+    public WebRtcViewerReceiver(bool includeAudio = true)
     {
         var config = new RTCConfiguration { iceServers = new List<RTCIceServer>() };
         config.iceServers.Add(new RTCIceServer { urls = WebRtcSettings.DefaultStunUrl });
@@ -46,12 +55,31 @@ public sealed class WebRtcViewerReceiver : IAsyncDisposable
         _pc.addTrack(new MediaStreamTrack(new List<VideoFormat> { h264Format },
             MediaStreamStatusEnum.RecvOnly));
 
+        if (includeAudio)
+        {
+            _pc.addTrack(new MediaStreamTrack(
+                new List<AudioFormat> { WebRtcHostSender.AacFormat },
+                MediaStreamStatusEnum.RecvOnly));
+        }
+
+        // AAC 音频没有标准 RTP 去包器（也不需要）：单帧小于 MTU，payload 原样即一帧
+        _pc.OnRtpPacketReceived += (endPoint, media, packet) =>
+        {
+            if (media != SDPMediaTypesEnum.audio) return;
+            if (packet.Payload is { Length: > 0 })
+                AudioFrameReceived?.Invoke(packet.Payload, packet.Header.Timestamp);
+        };
+
         // 收到重构的 H.264 帧（SIPSorcery 内部完成 RTP 去包/重组）
         _pc.OnVideoFrameReceived += (remoteEndPoint, timestamp, payload, format) =>
         {
             if (payload is { Length: > 0 })
                 FrameReceived?.Invoke(payload, DateTime.UtcNow.Ticks);
         };
+
+        // 音频格式协商成功的标记（决定 UI 是否显示「声音可用」）
+        _pc.OnAudioFormatsNegotiated += formats =>
+            AudioNegotiated = formats is { Count: > 0 };
 
         _pc.onicecandidate += candidate =>
         {

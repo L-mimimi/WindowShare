@@ -541,7 +541,7 @@ public partial class MainWindow : Window
                     _webRtcSink = null;
                     if (_webRtcSender != null) await _webRtcSender.DisposeAsync();
 
-                    _webRtcSender = new WebRtcHostSender();
+                    _webRtcSender = new WebRtcHostSender(includeAudio: true);
                     _webRtcSender.LocalIceCandidate += c =>
                         _ = _signaling?.RelayToViewerAsync(viewerId ?? "", "ice", c);
                     _webRtcSender.StateChanged += s => Logger.Info("Host", $"WebRTC: {s}");
@@ -552,11 +552,21 @@ public partial class MainWindow : Window
 
                     var offer = await _webRtcSender.CreateOfferAsync();
                     await _signaling?.RelayToViewerAsync(viewerId ?? "", "offer", offer)!;
-                    Logger.Info("Host", "WebRTC offer 已中继给观看者");
+                    Logger.Info("Host", "WebRTC offer（含音频轨）已中继给观看者");
                     break;
 
                 case "answer":
-                    _webRtcSender?.SetAnswer(payload);
+                    try
+                    {
+                        _webRtcSender?.SetAnswer(payload);
+                    }
+                    catch (Exception ex)
+                    {
+                        // 旧版观看端（v1.2，无音频能力）对带音频轨的 offer 可能协商失败：
+                        // 降级为纯视频 offer 重试一次，旧观看端按 v1.2 流程应答
+                        Logger.Warn("Host", $"WebRTC answer 协商失败，尝试纯视频降级: {ex.Message}");
+                        await RestartWebRtcWithoutAudioAsync(viewerId);
+                    }
                     break;
 
                 case "ice":
@@ -568,6 +578,27 @@ public partial class MainWindow : Window
         {
             Logger.Error("Host", "WebRTC 中继处理异常", ex);
         }
+    }
+
+    /// <summary>WebRTC 音频协商失败 → 重建纯视频发送端并重发 offer（旧观看端兼容）</summary>
+    private async System.Threading.Tasks.Task RestartWebRtcWithoutAudioAsync(string? viewerId)
+    {
+        if (_session is not { IsSharing: true }) return;
+        if (_webRtcSink != null) _session.RemoveSink(_webRtcSink);
+        _webRtcSink = null;
+        var oldSender = _webRtcSender;
+        if (oldSender != null) await oldSender.DisposeAsync();
+
+        _webRtcSender = new WebRtcHostSender(includeAudio: false);
+        _webRtcSender.LocalIceCandidate += c =>
+            _ = _signaling?.RelayToViewerAsync(viewerId ?? "", "ice", c);
+        _webRtcSender.StateChanged += s => Logger.Info("Host", $"WebRTC(纯视频): {s}");
+        _webRtcSink = new WebRtcSinkAdapter(_webRtcSender, _session.Options?.Fps ?? 30);
+        _session.AddSink(_webRtcSink);
+
+        var offer = await _webRtcSender.CreateOfferAsync();
+        await _signaling?.RelayToViewerAsync(viewerId ?? "", "offer", offer)!;
+        Logger.Info("Host", "纯视频 offer 已重发");
     }
 
     /// <summary>信令观看者审批（UI 线程弹窗，结果回传真令）</summary>
