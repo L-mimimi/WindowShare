@@ -1,0 +1,23 @@
+# CI：构建 + 单元测试（冒烟测试需要真实采集/音频设备，只在本地跑，见 docs/TESTING.md）
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Build
+        run: dotnet build -c Release -m:1
+
+      - name: Unit tests
+        run: dotnet test -c Release --no-build -m:1
