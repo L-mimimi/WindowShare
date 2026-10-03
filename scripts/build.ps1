@@ -31,7 +31,13 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
-$version = "1.2.0"
+# 版本号单源化：唯一出处是 Directory.Build.props 的 <Version>，安装包经 /DMyAppVersion 注入
+[xml]$propsXml = Get-Content (Join-Path $root "Directory.Build.props") -Raw
+$versionNode = $propsXml.Project.PropertyGroup | Where-Object { $_.Version } | Select-Object -First 1
+$version = "$($versionNode.Version)".Trim()
+if ($version -notmatch '^\d+\.\d+\.\d+') {
+    throw "Directory.Build.props 中未找到合法的 <Version>（当前: '$version'）"
+}
 
 # ---------- 定位 dotnet（必须带 SDK，优先 PATH，其次用户级安装目录） ----------
 function Test-DotnetSdk([string]$exe) {
@@ -131,7 +137,7 @@ else {
     }
 
     Write-Host "  使用编译器: $iscc" -ForegroundColor DarkGray
-    & $iscc (Join-Path $root "installer\WindowShare.iss")
+    & $iscc "/DMyAppVersion=$version" (Join-Path $root "installer\WindowShare.iss")
     if ($LASTEXITCODE -ne 0) { throw "打包失败" }
     Write-Host "安装包目录: $(Join-Path $root 'installer\output')" -ForegroundColor Green
 }

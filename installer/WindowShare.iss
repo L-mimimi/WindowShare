@@ -6,7 +6,11 @@
 
 #define MyAppName "WindowShare"
 #define MyAppChineseName "窗享"
-#define MyAppVersion "1.2.0"
+; 版本号单源化：正常由 scripts/build.ps1 通过 /DMyAppVersion=<Version> 传入
+; （出处是 Directory.Build.props）。直接用 ISCC 编译时回退到下面的占位版本。
+#ifndef MyAppVersion
+  #define MyAppVersion "0.0.0-dev"
+#endif
 #define MyAppPublisher "WindowShare"
 #define MyAppExeName "WindowShare.Host.exe"
 #define PublishDir "..\dist\publish"
