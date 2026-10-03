@@ -24,6 +24,12 @@ public sealed class HostSettings
     /// <summary>共享期间广播 LAN 发现信标（Viewer 可自动看到本机；不含任何密钥）</summary>
     public bool Discoverable { get; set; } = true;
 
+    /// <summary>
+    /// LAN 共享监听地址（高级项，一般不改配置文件）：填本机某个 IPv4（如 192.168.1.10）
+    /// 则只在该网卡监听；空 = 所有网卡。
+    /// </summary>
+    public string BindAddress { get; set; } = "";
+
     public string SignalingUrl { get; set; } = "http://localhost:5000";
 
     /// <summary>上次共享源（best-effort 恢复：源列表里找不到同类型同句柄就不恢复）</summary>

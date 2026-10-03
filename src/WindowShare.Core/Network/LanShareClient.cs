@@ -197,11 +197,12 @@ public sealed class LanShareClient : IDisposable
     {
         try
         {
-            // 1) AuthRequest
+            // 1) AuthRequest（附带应用版本，Host 据此协商加密增强能力）
             var req = AuthPayload.Serialize(new AuthRequestPayload
             {
                 DeviceId = DeviceId,
                 DeviceName = DeviceName,
+                AppVersion = typeof(LanShareClient).Assembly.GetName().Version?.ToString(3) ?? "",
             });
             conn.Send(MessageType.AuthRequest, FrameFlags.None, req);
 
@@ -241,12 +242,14 @@ public sealed class LanShareClient : IDisposable
             if (!result.Ok)
                 return new AuthOutcome(false, string.IsNullOrEmpty(result.Reason) ? "认证被拒绝" : result.Reason, false, "");
 
-            // 5) 启用会话加密
+            // 5) 启用会话加密（AAD 绑定与防重放按 Host 协商结果开关）
             if (result.EncryptionEnabled && ecdh != null && clientPub != null)
             {
                 var aesKey = ecdh.DeriveSessionKey(hostPub! /*本地生成方: 派生用对方公钥=Host 公钥*/, salt);
                 conn.EnableEncryption(new AesGcmSession(aesKey));
-                Logging.Logger.Info("LanClient", "会话加密已启用 (AES-256-GCM)");
+                conn.UseAadBinding = result.AadBindingEnabled;
+                Logging.Logger.Info("LanClient",
+                    "会话加密已启用 (AES-256-GCM" + (result.AadBindingEnabled ? "+AAD 防重放" : "") + ")");
             }
             ecdh?.Dispose();
 

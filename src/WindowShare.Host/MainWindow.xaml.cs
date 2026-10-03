@@ -341,7 +341,8 @@ public partial class MainWindow : Window
 
         // LAN 共享服务器：观看者经密码+白名单审批接入
         _whitelist = new DeviceWhitelist();
-        _server = new LanShareServer(_session, _whitelist, LanShareServer.DefaultPort);
+        _server = new LanShareServer(_session, _whitelist, LanShareServer.DefaultPort,
+            _settings.BindAddress);
         _server.ApproveRequired = info => System.Threading.Tasks.Task.FromResult(Dispatcher.Invoke(() => ApproveDevice(info)));
         _server.ViewerCountChanged += count => Dispatcher.BeginInvoke(() =>
             TxtStats.Text = $"观看者：{count}");

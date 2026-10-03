@@ -58,13 +58,13 @@ public sealed class AesGcmSession : IDisposable
     }
 
     /// <summary>加密：返回 nonce+密文+tag</summary>
-    public byte[] Encrypt(ReadOnlySpan<byte> plain)
+    public byte[] Encrypt(ReadOnlySpan<byte> plain, ReadOnlySpan<byte> aad = default)
     {
         var result = new byte[OverheadSize + plain.Length];
         RandomNumberGenerator.Fill(result.AsSpan(0, NonceSize));
         var cipher = result.AsSpan(NonceSize, plain.Length);
         var tag = result.AsSpan(^TagSize);
-        _aes.Encrypt(result.AsSpan(0, NonceSize), plain, cipher, tag, associatedData: default);
+        _aes.Encrypt(result.AsSpan(0, NonceSize), plain, cipher, tag, aad);
         return result;
     }
 
@@ -72,8 +72,10 @@ public sealed class AesGcmSession : IDisposable
     /// 就地加密：workspace 布局须为 [nonce(12)][密文(N)][tag(16)]，N 由调用方传入。
     /// 负载先由调用方拷入密文段；本方法生成 nonce 后对密文段就地加密并填入 tag。
     /// 明文与密文为同一段内存，AesGcm 原生支持该种完全重叠的就地加密。
+    /// 传入 <paramref name="aad"/> 时（帧头字节），密文与帧头内容绑定——篡改类型/序号/长度
+    /// 任何一字节都会让接收端解密失败断连。
     /// </summary>
-    public void EncryptInPlace(Span<byte> workspace, int payloadLength)
+    public void EncryptInPlace(Span<byte> workspace, int payloadLength, ReadOnlySpan<byte> aad = default)
     {
         if (workspace.Length < OverheadSize + payloadLength)
             throw new ArgumentException("workspace 容量不足", nameof(workspace));
@@ -81,11 +83,11 @@ public sealed class AesGcmSession : IDisposable
         RandomNumberGenerator.Fill(nonce);
         var cipher = workspace.Slice(NonceSize, payloadLength);
         var tag = workspace.Slice(NonceSize + payloadLength, TagSize);
-        _aes.Encrypt(nonce, cipher, cipher, tag, associatedData: default);
+        _aes.Encrypt(nonce, cipher, cipher, tag, aad);
     }
 
     /// <summary>解密：payload 被篡改时抛出 CryptographicException</summary>
-    public byte[] Decrypt(ReadOnlySpan<byte> payload)
+    public byte[] Decrypt(ReadOnlySpan<byte> payload, ReadOnlySpan<byte> aad = default)
     {
         if (payload.Length < NonceSize + TagSize)
             throw new CryptographicException("密文过短");
@@ -93,7 +95,7 @@ public sealed class AesGcmSession : IDisposable
         var tag = payload[^TagSize..];
         var cipher = payload.Slice(NonceSize, payload.Length - NonceSize - TagSize);
         var plain = new byte[cipher.Length];
-        _aes.Decrypt(nonce, cipher, tag, plain, associatedData: default);
+        _aes.Decrypt(nonce, cipher, tag, plain, aad);
         return plain;
     }
 

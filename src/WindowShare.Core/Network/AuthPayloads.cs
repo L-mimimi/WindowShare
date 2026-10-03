@@ -11,6 +11,11 @@ public sealed record AuthRequestPayload
     [JsonPropertyName("deviceName")] public string DeviceName { get; init; } = "";
     [JsonPropertyName("proto")] public int ProtocolVersion { get; init; } = 1;
     [JsonPropertyName("roomCode")] public string RoomCode { get; init; } = "";
+    /// <summary>
+    /// 观看端应用版本（"1.3.0"；1.2.0 及更早版本不带此字段）。
+    /// Host 据此决定是否对本次连接启用「帧头 AAD 绑定 + 防重放」加密增强。
+    /// </summary>
+    [JsonPropertyName("ver")] public string AppVersion { get; init; } = "";
 }
 
 /// <summary>Host → Viewer：认证质询（salt + 服务端能力）</summary>
@@ -39,6 +44,11 @@ public sealed record AuthResultPayload
     [JsonPropertyName("reason")] public string Reason { get; init; } = "";
     /// <summary>是否启用会话加密</summary>
     [JsonPropertyName("enc")] public bool EncryptionEnabled { get; init; }
+    /// <summary>
+    /// 加密增强：24 字节帧头作为 AAD 绑定 + 加密帧序号防重放（1.3.0 起）。
+    /// 仅对表明支持该能力（ver ≥ 1.3）的观看端置 true；老版本忽略此字段继续用旧加密格式。
+    /// </summary>
+    [JsonPropertyName("aad")] public bool AadBindingEnabled { get; init; }
     /// <summary>会话信息：编码器名/分辨率（展示用）</summary>
     [JsonPropertyName("encoder")] public string EncoderName { get; init; } = "";
     [JsonPropertyName("width")] public int Width { get; init; }

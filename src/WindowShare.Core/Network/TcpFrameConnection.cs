@@ -18,9 +18,17 @@ public sealed class TcpFrameConnection : IDisposable
     private CancellationTokenSource? _readCts;
     private AesGcmSession? _encryption;
     private uint _sendSeq;
+    /// <summary>接收侧已见的最大序号（防重放：加密帧序号必须严格递增）</summary>
+    private long _lastRecvSeq;
 
     public bool IsConnected => _client.Connected && !_closed;
     private volatile bool _closed;
+
+    /// <summary>
+    /// 是否把 24 字节帧头作为 AAD 绑定进加密（1.3.0 起经认证握手协商；
+    /// 与旧版本对端互通时保持 false——密文只保护负载本身）。
+    /// </summary>
+    public bool UseAadBinding { get; set; }
 
     /// <summary>诊断用：底层关闭标志</summary>
     internal bool IsClosedForTest => _closed;
@@ -119,15 +127,17 @@ public sealed class TcpFrameConnection : IDisposable
         var total = FrameHeader.HeaderSize + payloadLen;
         buffer = EnsureSendBufferLocked(total);
 
+        // 帧头先写入：AAD 绑定模式下整段帧头参与加密认证
+        new FrameHeader(type, encrypted ? flags | FrameFlags.Encrypted : flags, seq, timestampUtc, payloadLen)
+            .Write(buffer);
         if (encrypted)
         {
             payload.CopyTo(buffer.AsSpan(FrameHeader.HeaderSize + AesGcmSession.NonceSize, payload.Length));
-            enc!.EncryptInPlace(buffer.AsSpan(FrameHeader.HeaderSize), payload.Length);
-            new FrameHeader(type, flags | FrameFlags.Encrypted, seq, timestampUtc, payloadLen).Write(buffer);
+            enc!.EncryptInPlace(buffer.AsSpan(FrameHeader.HeaderSize), payload.Length,
+                UseAadBinding ? buffer.AsSpan(0, FrameHeader.HeaderSize) : default);
         }
         else
         {
-            new FrameHeader(type, flags, seq, timestampUtc, payload.Length).Write(buffer);
             payload.CopyTo(buffer.AsSpan(FrameHeader.HeaderSize, payload.Length));
         }
         return total;
@@ -196,9 +206,21 @@ public sealed class TcpFrameConnection : IDisposable
                         Logging.Logger.Warn("TCP", "收到加密帧但未启用加密，断开");
                         break;
                     }
+                    // 防重放：加密帧序号必须严格递增（TCP 有序，乱序/重放即异常）
+                    if (UseAadBinding)
+                    {
+                        var prev = Interlocked.Read(ref _lastRecvSeq);
+                        if (hdr.Sequence <= prev)
+                        {
+                            Logging.Logger.Warn("TCP", $"加密帧序号回退（{hdr.Sequence} ≤ {prev}），疑似重放，断开");
+                            break;
+                        }
+                        Interlocked.Exchange(ref _lastRecvSeq, hdr.Sequence);
+                    }
                     try
                     {
-                        payload = enc.Decrypt(payload);
+                        payload = enc.Decrypt(payload,
+                            UseAadBinding ? header.AsSpan(0, FrameHeader.HeaderSize) : default);
                     }
                     catch (System.Security.Cryptography.CryptographicException)
                     {

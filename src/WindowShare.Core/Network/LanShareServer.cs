@@ -27,8 +27,16 @@ public sealed class LanShareServer : ShareSession.IFrameSink, ShareSession.IAudi
 {
     public const int DefaultPort = 48750;
 
+    /// <summary>未认证并发连接上限：握手中的连接最多这么多，超出直接断开（防连接洪泛）</summary>
+    internal const int MaxConcurrentUnauthenticated = 4;
+
+    /// <summary>已认证观看者上限（超出拒绝接入；正常使用远达不到）</summary>
+    internal const int MaxAuthenticatedViewers = 16;
+
     private readonly ShareSession _session;
     private readonly DeviceWhitelist _whitelist;
+    private readonly string? _bindAddress;
+    private readonly AuthRateLimiter _rateLimiter = new();
     private TcpListener? _listener;
     private CancellationTokenSource? _cts;
     private CongestionController? _controller;
@@ -49,18 +57,30 @@ public sealed class LanShareServer : ShareSession.IFrameSink, ShareSession.IAudi
     public bool IsRunning { get; private set; }
     public int Port { get; }
 
-    public LanShareServer(ShareSession session, DeviceWhitelist whitelist, int port = DefaultPort)
+    /// <summary>
+    /// <paramref name="bindAddress"/>：监听地址（如 "192.168.1.10" 只在内网网卡监听）；
+    /// null/空/解析失败 = 所有 IPv4 网卡（默认行为）。
+    /// </summary>
+    public LanShareServer(ShareSession session, DeviceWhitelist whitelist, int port = DefaultPort,
+        string? bindAddress = null)
     {
         _session = session;
         _whitelist = whitelist;
+        _bindAddress = string.IsNullOrWhiteSpace(bindAddress) ? null : bindAddress.Trim();
         Port = port;
     }
 
     public void Start()
     {
         if (IsRunning) return;
+        IPAddress bindIp = IPAddress.Any;
+        if (_bindAddress != null && (!IPAddress.TryParse(_bindAddress, out bindIp!) || bindIp.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork))
+        {
+            Logging.Logger.Warn("LanServer", $"监听地址 {_bindAddress} 无效，回退到所有网卡");
+            bindIp = IPAddress.Any;
+        }
         _cts = new CancellationTokenSource();
-        _listener = new TcpListener(IPAddress.Any, Port);
+        _listener = new TcpListener(bindIp, Port);
         try
         {
             _listener.Start();
@@ -105,7 +125,8 @@ public sealed class LanShareServer : ShareSession.IFrameSink, ShareSession.IAudi
         }, null, TimeSpan.FromSeconds(4), TimeSpan.FromSeconds(2));
 
         _ = Task.Run(() => AcceptLoopAsync(_cts.Token));
-        Logging.Logger.Info("LanServer", $"LAN 共享服务已启动，端口 {Port}");
+        Logging.Logger.Info("LanServer",
+            $"LAN 共享服务已启动，端口 {Port}，监听 {(bindIp == IPAddress.Any ? "所有网卡" : bindIp)}");
     }
 
     public void Stop()
@@ -246,6 +267,21 @@ public sealed class LanShareServer : ShareSession.IFrameSink, ShareSession.IAudi
                 continue;
             }
 
+            // 连接数上限：不认证直接断开，不给洪泛连接消耗线程与内存的机会
+            lock (_clientsGate)
+            {
+                var total = _clients.Count;
+                var unauthenticated = _clients.Count(c => !c.Authenticated);
+                if (unauthenticated >= MaxConcurrentUnauthenticated || total >= MaxAuthenticatedViewers)
+                {
+                    var remote = (client.Client.RemoteEndPoint as IPEndPoint)?.Address;
+                    Logging.Logger.Warn("LanServer",
+                        $"连接数超限（总 {total}/未认证 {unauthenticated}），拒绝来自 {remote} 的新连接");
+                    client.Dispose();
+                    continue;
+                }
+            }
+
             _ = Task.Run(() => HandleClientAsync(client, ct), ct);
         }
     }
@@ -313,6 +349,16 @@ public sealed class LanShareServer : ShareSession.IFrameSink, ShareSession.IAudi
     {
         var handshake = Task.Run(() =>
         {
+            // 0) 限流：冷却期内的 IP 直接拒绝（放在最前面，避免触发白名单弹窗干扰用户）
+            if (_rateLimiter.IsBlocked(client.RemoteAddress))
+            {
+                var denyMsg = AuthPayload.Serialize(new AuthResultPayload
+                { Ok = false, Reason = "认证失败次数过多，请稍后再试" });
+                try { conn.Send(MessageType.AuthResult, FrameFlags.None, denyMsg); } catch { }
+                Logging.Logger.Warn("LanServer", $"IP {client.RemoteAddress} 认证尝试过于频繁，已拒绝");
+                return false;
+            }
+
             // 1) AuthRequest
             var first = conn.ReadFrame();
             if (first == null) return false;
@@ -323,6 +369,8 @@ public sealed class LanShareServer : ShareSession.IFrameSink, ShareSession.IAudi
 
             client.DeviceId = req.DeviceId;
             client.DeviceName = req.DeviceName;
+            // 帧头 AAD 绑定 + 防重放：仅对表明 ≥1.3 的观看端启用（旧版本维持旧加密格式）
+            var aadBinding = PeerCapability.SupportsAadBinding(req.AppVersion);
 
             // 2) 白名单检查 + 必要时请求用户批准
             var approved = _whitelist.IsApproved(req.DeviceId);
@@ -375,25 +423,45 @@ public sealed class LanShareServer : ShareSession.IFrameSink, ShareSession.IAudi
             {
                 var fail = AuthPayload.Serialize(new AuthResultPayload { Ok = false, Reason = "密码错误" });
                 conn.Send(MessageType.AuthResult, FrameFlags.None, fail);
-                Logging.Logger.Warn("LanServer", $"密码校验失败: {req.DeviceName} ({client.RemoteAddress})");
+                _rateLimiter.RecordFailure(client.RemoteAddress);
+                Logging.Logger.Warn("LanServer",
+                    $"密码校验失败: {req.DeviceName} ({client.RemoteAddress})" +
+                    (_rateLimiter.IsBlocked(client.RemoteAddress) ? "，该 IP 已进入冷却期" : ""));
                 return false;
             }
 
-            // 6) 会话加密（客户端提供公钥 → 派生 AES-256-GCM 密钥）
+            // 6) 会话加密（强制：质询提供了加密能力而观看端不配合 → 拒绝，绝不回退明文。
+            //    否则「已认证」的连接会以明文跑完整个会话，加密形同虚设）
             var encEnabled = false;
-            if (ecdh != null && !string.IsNullOrEmpty(proof.ClientPubB64))
+            if (ecdh != null)
             {
+                if (string.IsNullOrEmpty(proof.ClientPubB64))
+                {
+                    var reject = AuthPayload.Serialize(new AuthResultPayload
+                    { Ok = false, Reason = "观看端未提供加密公钥（Host 已强制加密）" });
+                    conn.Send(MessageType.AuthResult, FrameFlags.None, reject);
+                    Logging.Logger.Warn("LanServer",
+                        $"观看端 {req.DeviceName} 认证通过但拒绝加密，已断开（不回退明文）");
+                    return false;
+                }
                 try
                 {
                     var clientPub = Convert.FromBase64String(proof.ClientPubB64);
                     var aesKey = ecdh.DeriveSessionKey(clientPub, salt);
                     conn.EnableEncryption(new AesGcmSession(aesKey));
+                    conn.UseAadBinding = aadBinding;
                     encEnabled = true;
-                    Logging.Logger.Info("LanServer", $"会话加密已启用 (AES-256-GCM): {client.DeviceName}");
+                    Logging.Logger.Info("LanServer",
+                        $"会话加密已启用 (AES-256-GCM{(aadBinding ? "+AAD" : "")}): {client.DeviceName}");
                 }
                 catch (Exception ex)
                 {
-                    Logging.Logger.Warn("LanServer", $"加密协商失败（回退明文，认证已通过）: {ex.Message}");
+                    var fail2 = AuthPayload.Serialize(new AuthResultPayload
+                    { Ok = false, Reason = "会话加密协商失败" });
+                    conn.Send(MessageType.AuthResult, FrameFlags.None, fail2);
+                    Logging.Logger.Warn("LanServer",
+                        $"加密协商失败（拒绝该连接，不回退明文）: {ex.Message}");
+                    return false;
                 }
             }
             ecdh?.Dispose();
@@ -403,6 +471,7 @@ public sealed class LanShareServer : ShareSession.IFrameSink, ShareSession.IAudi
             {
                 Ok = true,
                 EncryptionEnabled = encEnabled,
+                AadBindingEnabled = encEnabled && aadBinding,
                 EncoderName = _session.EncoderName,
                 Width = _session.Source?.Bounds.Width ?? 0,
                 Height = _session.Source?.Bounds.Height ?? 0,
@@ -414,6 +483,7 @@ public sealed class LanShareServer : ShareSession.IFrameSink, ShareSession.IAudi
             });
             conn.Send(MessageType.AuthResult, FrameFlags.None, result);
 
+            _rateLimiter.RecordSuccess(client.RemoteAddress);
             MarkAuthenticated(client);
             Logging.Logger.Info("LanServer",
                 $"观看者接入成功: {client.DeviceName} ({client.RemoteAddress}) 加密={encEnabled} " +
