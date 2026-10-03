@@ -773,4 +773,68 @@ public partial class MainWindow : Window
         _uiTimer.Stop();
         Logger.LogEmitted -= OnLogEmitted;
     }
+
+    // ===== 全屏/无边框观看（F11 / 双击画面 / 状态栏按钮；Esc 退出）=====
+
+    /// <summary>窗口内容网格（全屏时直接改行高隐藏面板）</summary>
+    private System.Windows.Controls.RowDefinitionCollection RowDefs => ((System.Windows.Controls.Grid)Content).RowDefinitions;
+
+    private bool _fullscreen;
+    private GridLength _rowConnection, _rowStatus;
+    private Thickness _videoAreaMargin, _videoImageMargin;
+
+    private void BtnFullscreen_Click(object sender, RoutedEventArgs e) => ToggleFullscreen();
+
+    private void VideoArea_MouseLeftButtonDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (e.ClickCount == 2) ToggleFullscreen();
+    }
+
+    /// <summary>窗口按键：F11 切换全屏，Esc 退出全屏</summary>
+    protected override void OnKeyDown(System.Windows.Input.KeyEventArgs e)
+    {
+        base.OnKeyDown(e);
+        if (e.Key == System.Windows.Input.Key.F11) ToggleFullscreen();
+        else if (e.Key == System.Windows.Input.Key.Escape && _fullscreen) ToggleFullscreen();
+    }
+
+    /// <summary>
+    /// 全屏 = 无边框 + 铺满 + 隐藏连接面板与状态栏，只留黑底画面。
+    /// 不持久化该状态：观看是临时场景，下次启动回到常规窗口更符合直觉。
+    /// </summary>
+    private void ToggleFullscreen()
+    {
+        if (_fullscreen)
+        {
+            WindowStyle = WindowStyle.SingleBorderWindow;
+            ResizeMode = ResizeMode.CanResize;
+            WindowState = WindowState.Normal;
+            RowDefs[0].Height = _rowConnection;
+            RowDefs[2].Height = _rowStatus;
+            VideoArea.Margin = _videoAreaMargin;
+            VideoImage.Margin = _videoImageMargin;
+            PanelConnection.Visibility = Visibility.Visible;
+            PanelStatusBar.Visibility = Visibility.Visible;
+            BtnFullscreen.Content = "全屏";
+            _fullscreen = false;
+        }
+        else
+        {
+            _rowConnection = RowDefs[0].Height;
+            _rowStatus = RowDefs[2].Height;
+            _videoAreaMargin = VideoArea.Margin;
+            _videoImageMargin = VideoImage.Margin;
+            WindowStyle = WindowStyle.None;
+            ResizeMode = ResizeMode.NoResize;
+            WindowState = WindowState.Maximized;
+            RowDefs[0].Height = new GridLength(0);
+            RowDefs[2].Height = new GridLength(0);
+            PanelConnection.Visibility = Visibility.Collapsed;
+            PanelStatusBar.Visibility = Visibility.Collapsed;
+            VideoArea.Margin = new Thickness(0);
+            VideoImage.Margin = new Thickness(0);
+            BtnFullscreen.Content = "退出全屏";
+            _fullscreen = true;
+        }
+    }
 }

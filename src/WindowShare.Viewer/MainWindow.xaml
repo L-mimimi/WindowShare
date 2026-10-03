@@ -13,7 +13,7 @@
         </Grid.RowDefinitions>
 
         <!-- 连接面板：两种模式各自独立的输入区，只有当前模式的输入框可用 -->
-        <GroupBox Grid.Row="0" Header="连接">
+        <GroupBox x:Name="PanelConnection" Grid.Row="0" Header="连接">
             <StackPanel>
                 <StackPanel Orientation="Horizontal">
                     <RadioButton x:Name="RbDirect" GroupName="ConnMode" IsChecked="True" VerticalAlignment="Center"
@@ -75,8 +75,10 @@
             </StackPanel>
         </GroupBox>
 
-        <!-- 视频区 -->
-        <Border Grid.Row="1" Background="#0A0A0A" Margin="6" CornerRadius="4">
+        <!-- 视频区：双击进入/退出全屏 -->
+        <Border x:Name="VideoArea" Grid.Row="1" Background="#0A0A0A" Margin="6" CornerRadius="4"
+                MouseLeftButtonDown="VideoArea_MouseLeftButtonDown"
+                ToolTip="双击或按 F11 进入/退出全屏，Esc 退出全屏">
             <Grid>
                 <Image x:Name="VideoImage" Stretch="Uniform"/>
                 <TextBlock x:Name="TxtPlaceholder" Text="输入房间号或直连地址开始观看" Foreground="#888"
@@ -85,8 +87,12 @@
         </Border>
 
         <!-- 状态栏 -->
-        <Border Grid.Row="2" Background="#F2F2F2" Padding="8,4">
-            <StackPanel Orientation="Horizontal">
+        <Border x:Name="PanelStatusBar" Grid.Row="2" Background="#F2F2F2" Padding="8,4">
+            <DockPanel LastChildFill="True">
+                <Button DockPanel.Dock="Right" x:Name="BtnFullscreen" Content="全屏" Padding="10,2"
+                        Margin="8,0,0,0" Click="BtnFullscreen_Click"
+                        ToolTip="全屏/退出全屏（F11 或双击画面；Esc 退出）"/>
+                <StackPanel Orientation="Horizontal">
                 <TextBlock x:Name="TxtState" Text="状态：未连接" FontWeight="Bold" Margin="0,0,18,0"/>
                 <TextBlock x:Name="TxtTransport" Text="传输：-" Margin="0,0,18,0"/>
                 <TextBlock x:Name="TxtBitrate" Text="码率：-" Margin="0,0,18,0"/>
@@ -97,7 +103,8 @@
                 <TextBlock x:Name="TxtAudio" Text="声音：-" Margin="0,0,18,0"/>
                 <TextBlock x:Name="TxtEncrypt" Text="加密：-"/>
                 <TextBlock x:Name="TxtMode" Text="" Margin="18,0,0,0" Foreground="#1E88E5"/>
-            </StackPanel>
+                </StackPanel>
+            </DockPanel>
         </Border>
     </Grid>
 </Window>

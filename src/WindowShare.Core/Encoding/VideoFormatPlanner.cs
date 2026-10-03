@@ -16,9 +16,9 @@ public static class VideoFormatPlanner
     public const int MinWidth = 320;
     public const int MinHeight = 240;
 
-    /// <summary>码率上下限：4K 高帧率最高 80 Mbps，再低不低于 800 kbps</summary>
-    public const int MaxBitrateBps = 80_000_000;
-    public const int MinBitrateBps = 800_000;
+    /// <summary>码率上下限：4K 高帧率最高 120 Mbps，再低不低于 1.5 Mbps</summary>
+    public const int MaxBitrateBps = 120_000_000;
+    public const int MinBitrateBps = 1_500_000;
 
     /// <summary>UI 帧率档位（帧率不宜过高，144 为上限）</summary>
     public static readonly int[] FpsTiers = { 24, 30, 60, 90, 120, 144 };
@@ -84,7 +84,7 @@ public static class VideoFormatPlanner
         if (width < 2 || height < 2) return MinBitrateBps;
         var safeFps = Math.Clamp(fps, 1, 240);
 
-        const double bitsPerPixel = 0.085;      // 屏幕内容经验值（文本/图形为主）
+        const double bitsPerPixel = 0.14;       // 屏幕内容经验值（文本/图形为主；0.085 偏糊，1.3.2 提高约 65%）
         const double referencePixels = 1920.0 * 1080.0;
 
         var pixels = (double)width * height;
@@ -109,7 +109,7 @@ public static class VideoFormatPlanner
 
     /// <summary>
     /// H.264 Level 约束表（eAVEncH264VLevel 值 / 单帧最大宏块数 MaxFS / 每秒最大宏块数 MaxMBPS）。
-    /// 来源：ITU-T H.264 Table A-1。码率上限 <see cref="MaxBitrateBps"/>（80Mbps）远低于
+    /// 来源：ITU-T H.264 Table A-1。码率上限 <see cref="MaxBitrateBps"/>（120Mbps）远低于
     /// 各 level 的 MaxBR，因此 level 只需按「分辨率 × 帧率」推导。
     /// </summary>
     private static readonly (int Level, int MaxFs, int MaxMbPerSec)[] H264Levels =

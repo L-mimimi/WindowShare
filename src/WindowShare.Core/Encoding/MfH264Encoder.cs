@@ -360,7 +360,8 @@ public sealed class MfH264Encoder : IDisposable
     /// H.264 Level 必须显式下发：Microsoft AVC DX12 Encoder 默认锁在 Level 5.0，
     /// 4K（32400 宏块/帧）或 1080p144（1175040 宏块/秒）会被直接拒绝（E_INVALIDARG）。
     /// 依次尝试「带 level」「不带 level」，兼容不接受该属性的编码器。
-    /// Profile 不动：保持码流 profile 与 WebRTC SDP 里 profile-level-id 的既有约定。
+    /// Profile 优先尝试 High（CABAC 熵编码，同码率下明显更清晰），拒绝则退回编码器默认；
+    /// WebRTC SDP 里声明的 profile-level-id 仅作展示——两端都是本应用自家的解码器，不作强校验。
     /// </summary>
     private static bool TryConfigureTypes(IMFTransform transform, EncoderSettings settings,
         out int appliedLevel, out string error)
@@ -369,6 +370,8 @@ public sealed class MfH264Encoder : IDisposable
         appliedLevel = level;
         error = string.Empty;
 
+        const uint eAVEncH264VProfile_High = 100;
+        foreach (var useProfile in new[] { true, false })
         foreach (var useLevel in new[] { true, false })
         {
             var outType = MediaFactory.MFCreateMediaType();
@@ -381,11 +384,13 @@ public sealed class MfH264Encoder : IDisposable
                 outType.Set(MediaTypeAttributeKeys.InterlaceMode, 2u); // Progressive
                 outType.Set(MediaTypeAttributeKeys.AvgBitrate, (uint)settings.BitrateBps);
                 if (useLevel) outType.Set(MediaTypeAttributeKeys.Mpeg2Level, (uint)level);
+                if (useProfile) outType.Set(MediaTypeAttributeKeys.Mpeg2Profile, eAVEncH264VProfile_High);
                 transform.SetOutputType(0, outType, 0);
             }
             catch (SharpGenException ex)
             {
-                error = $"SetOutputType(level={(useLevel ? VideoFormatPlanner.H264LevelName(level) : "未设置")}) " +
+                error = $"SetOutputType(profile={(useProfile ? "High" : "默认")}, " +
+                        $"level={(useLevel ? VideoFormatPlanner.H264LevelName(level) : "未设置")}) " +
                         $"0x{ex.HResult:X8}";
                 continue;
             }
@@ -405,6 +410,8 @@ public sealed class MfH264Encoder : IDisposable
                 inType.Set(MediaTypeAttributeKeys.AllSamplesIndependent, 1u);
                 transform.SetInputType(0, inType, 0);
                 appliedLevel = useLevel ? level : 0;
+                if (useProfile)
+                    Logging.Logger.Info("MF", "H.264 编码启用 High Profile（CABAC，同码率下更清晰）");
                 return true;
             }
             catch (SharpGenException ex)

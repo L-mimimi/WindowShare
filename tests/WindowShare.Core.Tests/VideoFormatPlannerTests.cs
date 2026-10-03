@@ -156,9 +156,9 @@ public class VideoFormatPlannerTests
     }
 
     [Theory]
-    [InlineData(1920, 1080, 30, 3_000_000, 8_000_000)]    // 1080p30 约 5 Mbps
-    [InlineData(3840, 2160, 30, 12_000_000, 26_000_000)]   // 4K30 约 17 Mbps
-    [InlineData(3840, 2160, 60, 22_000_000, 45_000_000)]   // 4K60 约 30 Mbps
+    [InlineData(1920, 1080, 30, 7_000_000, 10_500_000)]    // 1080p30 约 8.7 Mbps（bpp 0.14）
+    [InlineData(3840, 2160, 30, 22_000_000, 36_000_000)]   // 4K30 约 28 Mbps
+    [InlineData(3840, 2160, 60, 40_000_000, 60_000_000)]   // 4K60 约 49 Mbps
     public void SuggestBitrate_InExpectedRange(int w, int h, int fps, int min, int max)
     {
         Assert.InRange(VideoFormatPlanner.SuggestBitrateBps(w, h, fps), min, max);
