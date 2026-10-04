@@ -217,9 +217,19 @@ public sealed class LanShareClient : IDisposable
             });
             conn.Send(MessageType.AuthRequest, FrameFlags.None, req);
 
-            // 2) AuthChallenge
+            // 2) AuthChallenge（Host 可能在这一步直接回 AuthResult 拒绝接入，
+            //    如 HEVC 会话拒接不支持的观看端——把真实原因带给用户而不是报「未响应质询」）
             var challengeFrame = conn.ReadFrame();
-            if (challengeFrame == null || challengeFrame.Value.Header.Type != MessageType.AuthChallenge)
+            if (challengeFrame == null)
+                return new AuthOutcome(false, "Host 未响应认证质询", false, "");
+            if (challengeFrame.Value.Header.Type == MessageType.AuthResult)
+            {
+                var earlyReject = AuthPayload.Deserialize<AuthResultPayload>(challengeFrame.Value.Payload);
+                return new AuthOutcome(false,
+                    string.IsNullOrEmpty(earlyReject?.Reason) ? "Host 拒绝接入" : earlyReject!.Reason,
+                    false, "");
+            }
+            if (challengeFrame.Value.Header.Type != MessageType.AuthChallenge)
                 return new AuthOutcome(false, "Host 未响应认证质询", false, "");
             var challenge = AuthPayload.Deserialize<AuthChallengePayload>(challengeFrame.Value.Payload);
             if (challenge == null)

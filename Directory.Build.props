@@ -1,7 +1,7 @@
 <Project>
   <!-- 所有子项目共享的公共属性 -->
   <PropertyGroup>
-    <Version>1.4.0</Version>
+    <Version>1.4.1</Version>
     <Authors>WindowShare</Authors>
     <Product>WindowShare (窗享)</Product>
     <LangVersion>latest</LangVersion>

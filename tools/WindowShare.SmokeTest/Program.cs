@@ -47,6 +47,7 @@ public static class Program
             var ok2c = RunPart("Part2c", Part2cHevcRoundtrip);
             var ok3 = RunPart("Part3", Part3RealCapture);
             var ok4 = RunPart("Part4", Part4LoopbackE2E);
+            var ok4b = RunPart("Part4b", Part4bHevcNegotiation);
             var ok5 = RunPart("Part5", Part5Signaling);
             var ok6 = RunPart("Part6", Part6WebRtcLoopback);
             var ok7 = RunPart("Part7", Part7Audio);
@@ -55,9 +56,10 @@ public static class Program
                 $"===== 结果: 合成编码={(ok2 ? "PASS" : "FAIL")}, " +
                 $"4K/高帧率={(ok2b ? "PASS" : "FAIL")}, HEVC往返={(ok2c ? "PASS" : "FAIL")}, " +
                 $"真实捕获={(ok3 ? "PASS" : "FAIL")}, 回环端到端={(ok4 ? "PASS" : "FAIL")}, " +
+                $"HEVC协商={(ok4b ? "PASS" : "FAIL")}, " +
                 $"信令={(ok5 ? "PASS" : "FAIL")}, WebRTC={(ok6 ? "PASS" : "FAIL")}, " +
                 $"系统声音={(ok7 ? "PASS" : "FAIL")}, 局域网发现={(ok8 ? "PASS" : "FAIL")} =====");
-            return ok2 && ok2b && ok2c && ok3 && ok4 && ok5 && ok6 && ok7 && ok8 ? 0 : 1;
+            return ok2 && ok2b && ok2c && ok3 && ok4 && ok4b && ok5 && ok6 && ok7 && ok8 ? 0 : 1;
         }
         catch (Exception ex)
         {
@@ -406,6 +408,113 @@ public static class Program
                 bgra[i + 2] = 0xF0;
                 bgra[i + 3] = 0xFF;
             }
+        }
+    }
+
+    /// <summary>
+    /// HEVC 会话协商验证：HEVC 会话 + 各能力观看端的认证行为。
+    ///   负例（必测）：HevcSupported=false 的观看端 → 认证被拒，原因含 HEVC（验证服务端拒接
+    ///   + 客户端早期拒绝帧解析——拒接以 AuthResult 出现在质询位置， reason 必须完整到达）。
+    ///   正例（软性）：本机 HEVC 解码探针通过时，HevcSupported=true → 正常接入并解码。
+    /// 无 HEVC 编码器的平台上整段跳过（HEVC 是可选增强）。
+    /// </summary>
+    private static bool Part4bHevcNegotiation()
+    {
+        Logger.Info("Part4b", "---- HEVC 会话协商验证 ----");
+        var primary = CaptureSourceList.GetMonitors().FirstOrDefault(m => m.IsPrimary);
+        if (primary == null) { Logger.Error("Part4b", "找不到主显示器"); return false; }
+
+        var hevcSettings = new EncoderSettings
+        {
+            Codec = VideoCodec.Hevc, Width = 1280, Height = 720, Fps = 15, BitrateBps = 2_500_000,
+        };
+        if (!MfVideoEncoder.ProbeAvailable(hevcSettings))
+        {
+            Logger.Info("Part4b", "平台无可用 HEVC 编码器 → 跳过");
+            Logger.Info("Part4b", "Part4b PASS（软性）");
+            return true;
+        }
+
+        const int testPort = 48763;
+        var session = new ShareSession();
+        var whitelist = new DeviceWhitelist();
+        whitelist.Approve("test-viewer-device", "AutoTest Viewer");
+
+        var server = new LanShareServer(session, whitelist, testPort);
+        server.ApproveRequired = _ => Task.FromResult(true);
+        var decodeOk = ProbeHevcDecodeInSubprocess();
+        try
+        {
+            session.Start(primary, new ShareOptions
+            {
+                Width = 1280, Fps = 15, BitrateBps = 2_500_000,
+                Codec = VideoCodec.Hevc,
+                CaptureEngine = CaptureEnginePreference.Gdi,
+            });
+            server.Start();
+
+            // ===== 负例：不支持 HEVC 的观看端必须被拒且原因明确 =====
+            var failedEvent = new ManualResetEventSlim(false);
+            var failureReason = "";
+            var rejectClient = new LanShareClient("127.0.0.1", testPort,
+                "test-viewer-device", "AutoTest Viewer", session.Password)
+            { HevcSupported = false };
+            rejectClient.StateChanged += (s, err) =>
+            {
+                if (s == ConnectionState.Failed)
+                {
+                    failureReason = err ?? "";
+                    failedEvent.Set();
+                }
+            };
+            rejectClient.Start();
+            var rejected = failedEvent.Wait(TimeSpan.FromSeconds(10));
+            rejectClient.Stop();
+            rejectClient.Dispose();
+            Logger.Info("Part4b",
+                $"负例: 被拒={rejected}, 原因=\"{failureReason}\"");
+            var rejectOk = rejected && failureReason.Contains("HEVC", StringComparison.OrdinalIgnoreCase);
+
+            // ===== 正例（软性）：支持 HEVC 的观看端正常接入解码 =====
+            bool positiveOk;
+            if (!decodeOk)
+            {
+                Logger.Info("Part4b", "本机 HEVC 解码不可用（子进程探针），正例跳过");
+                positiveOk = true;
+            }
+            else
+            {
+                var connectedEvent = new ManualResetEventSlim(false);
+                long decodedFrames = 0;
+                using var decoder = new MfVideoDecoder(VideoCodec.Hevc);
+                decoder.Decoded += _ => Interlocked.Increment(ref decodedFrames);
+                var okClient = new LanShareClient("127.0.0.1", testPort,
+                    "test-viewer-device", "AutoTest Viewer", session.Password)
+                { HevcSupported = true };
+                okClient.StateChanged += (s, _) =>
+                {
+                    if (s == ConnectionState.Connected) connectedEvent.Set();
+                };
+                okClient.FrameReceived += f => decoder.Decode(f.Data, f.TimestampUtc);
+                okClient.Start();
+                var connected = connectedEvent.Wait(TimeSpan.FromSeconds(10));
+                if (connected) Thread.Sleep(5000);
+                okClient.Stop();
+                okClient.Dispose();
+                var flushed = decoder.Flush();
+                Logger.Info("Part4b",
+                    $"正例: 接入={connected}, 解码 {Interlocked.Read(ref decodedFrames)} 帧（含抽干 {flushed}）");
+                positiveOk = connected && Interlocked.Read(ref decodedFrames) >= 10;
+            }
+
+            var pass = rejectOk && positiveOk;
+            Logger.Info("Part4b", pass ? "Part4b PASS" : "Part4b FAIL");
+            return pass;
+        }
+        finally
+        {
+            server.Stop();
+            session.Stop("part4b-end");
         }
     }
 

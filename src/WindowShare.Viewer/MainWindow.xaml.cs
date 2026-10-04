@@ -356,6 +356,7 @@ public partial class MainWindow : Window
 
         TxtState.Text = $"状态：已批准，尝试直连 {info.LanEndpoints.Count} 个端点…";
 
+        string? hevcBlockReason = null;
         foreach (var endpoint in info.LanEndpoints)
         {
             var parts = endpoint.Split(':');
@@ -369,10 +370,15 @@ public partial class MainWindow : Window
             AttachClient(client);
 
             var connected = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            string? failure = null;
             client.StateChanged += (state, err) =>
             {
                 if (state == ConnectionState.Connected) connected.TrySetResult();
-                else if (state == ConnectionState.Failed) connected.TrySetException(new Exception(err ?? "认证失败"));
+                else if (state == ConnectionState.Failed)
+                {
+                    failure = err;
+                    connected.TrySetException(new Exception(err ?? "认证失败"));
+                }
             };
             client.Start();
 
@@ -386,6 +392,23 @@ public partial class MainWindow : Window
             }
             client.Stop();
             client.Dispose();
+
+            // HEVC 拒接是确定性失败（本端不支持解码），WebRTC 回退同样会被拒——
+            // 直接把可操作的提示留给用户，不再空转
+            if (failure != null && failure.Contains("HEVC", StringComparison.OrdinalIgnoreCase))
+            {
+                hevcBlockReason = failure;
+                break;
+            }
+        }
+
+        if (hevcBlockReason != null)
+        {
+            TxtState.Text = $"状态：{hevcBlockReason}";
+            Logger.Warn("Viewer", $"观看被拒: {hevcBlockReason}");
+            BtnConnect.IsEnabled = true;
+            BtnDisconnect.IsEnabled = false;
+            return;
         }
 
         // LAN 直连全部失败 → WebRTC 回退（SDP/ICE 经信令中继，媒体 DTLS-SRTP 端到端）
@@ -429,7 +452,8 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Host 中继消息处理：offer/ice
+    /// Host 中继消息处理：webrtc-reject/offer/ice。
+    /// 注意：本方法在信令收发线程上触发，任何 UI 访问必须经 Dispatcher 调度。
     /// </summary>
     private async void OnRelayFromHost(ViewerSignalingClient signaling, string room, string type, string payload)
     {
@@ -439,8 +463,9 @@ public partial class MainWindow : Window
             {
                 case "webrtc-reject":
                     // Host 拒绝 WebRTC（如 HEVC 会话）：给出可操作的原因
-                    TxtState.Text = $"状态：跨网段观看被拒（{payload}）";
                     Logger.Warn("Viewer", $"WebRTC 请求被 Host 拒绝: {payload}");
+                    Dispatcher.BeginInvoke(() =>
+                        TxtState.Text = $"状态：跨网段观看被拒（{payload}）");
                     break;
                 case "offer":
                     if (_webRtcReceiver == null)
@@ -449,7 +474,7 @@ public partial class MainWindow : Window
                     }
                     var answer = await _webRtcReceiver.AcceptOfferAsync(payload);
                     await signaling.RelayToHostAsync(room, "answer", answer);
-                    TxtPlaceholder.Visibility = Visibility.Collapsed;
+                    Dispatcher.BeginInvoke(() => TxtPlaceholder.Visibility = Visibility.Collapsed);
                     break;
                 case "ice":
                     _webRtcReceiver?.AddIceCandidate(payload);
