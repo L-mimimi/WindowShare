@@ -466,6 +466,21 @@ public partial class MainWindow : Window
             return;
         }
 
+        // 信令地址指向本机默认端口而服务器没在跑 → 自动拉起程序目录自带的信令服务器，
+        // 这是「勾上信令就能用」零操作流程的关键一步；远程地址不代劳（那台机器不归我们管）。
+        if (IsLocalSignalingUrl(url) && !await IsOurSignalingUpAsync())
+        {
+            SetSignalingState("本机信令未运行，正在自动启动…", SignalingUiState.Pending);
+            Logger.Info("Host", "连接信令前发现本机服务器未运行，自动拉起");
+            if (!await EnsureLocalSignalingRunningAsync())
+            {
+                Logger.Warn("Host", "本机信令服务器自动启动失败，房间号模式不可用（局域网直连共享不受影响）");
+                SetSignalingState("本机信令自动启动失败（5000 端口可能被占用）｜局域网直连共享不受影响",
+                    SignalingUiState.Error);
+                return;
+            }
+        }
+
         for (var attempt = 1; attempt <= SignalingRegisterRetries; attempt++)
         {
             if (_session is not { IsSharing: true }) return;   // 期间已停止共享
@@ -499,7 +514,7 @@ public partial class MainWindow : Window
                 // 日志与状态栏用同一份「可照着排查」的文案：只写原始异常消息时，
                 // 「由于目标计算机积极拒绝，无法连接」看着像共享失败，实际只是房间号模式没连上。
                 Logger.Warn("Host", HostSignalingClient.DescribeConnectFailure(url, ex) +
-                                    "｜共享照常进行，仅房间号模式不可用；启动信令服务器后点「重试」即可");
+                                    "｜共享照常进行，仅房间号模式不可用；可点「重试」再试（本机信令会自动拉起）");
                 DisposeSignaling();
                 SetSignalingState(HostSignalingClient.DescribeConnectFailure(url, ex) +
                                   "｜局域网直连共享不受影响", SignalingUiState.Error);
@@ -613,22 +628,43 @@ public partial class MainWindow : Window
 
     private async System.Threading.Tasks.Task StartLocalSignalingAsync()
     {
+        if (await EnsureLocalSignalingRunningAsync())
+            return;
+
+        MessageBox.Show(this,
+            "本机信令服务器未能启动：可能未找到 signaling\\WindowShare.Signaling.exe，或 5000 端口被其他程序占用。\n" +
+            "详见日志，或手动运行 signaling\\WindowShare.Signaling.exe 查看报错。",
+            "启动失败", MessageBoxButton.OK, MessageBoxImage.Warning);
+    }
+
+    /// <summary>是否指向本机默认信令地址（自动拉起只对它生效；自定义端口/远程地址不代劳）</summary>
+    private static bool IsLocalSignalingUrl(string url)
+    {
+        var trimmed = url.TrimEnd('/');
+        return trimmed.Equals("http://localhost:5000", StringComparison.OrdinalIgnoreCase) ||
+               trimmed.Equals("http://127.0.0.1:5000", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// 确保本机信令服务器在运行：已在跑直接复用；否则启动程序目录自带的信令进程并等待就绪（≤12 秒）。
+    /// 不弹窗（自动拉起与手动按钮共用，失败只写日志返回 false）；按钮路径由 <see cref="StartLocalSignalingAsync"/> 补提示。
+    /// </summary>
+    private async System.Threading.Tasks.Task<bool> EnsureLocalSignalingRunningAsync()
+    {
         try
         {
             // 已经有我们的信令在跑（上次未关 / 另一窗口启动的）→ 直接接管状态
             if (await IsOurSignalingUpAsync())
             {
                 MarkLocalSignalingRunning(null);
-                return;
+                return true;
             }
 
             var exe = FindSignalingExe();
             if (exe == null)
             {
-                MessageBox.Show(this,
-                    "未找到信令服务器程序（signaling\\WindowShare.Signaling.exe）。\n便携版与安装版默认自带该目录。",
-                    "提示", MessageBoxButton.OK, MessageBoxImage.Information);
-                return;
+                Logger.Warn("Host", "未找到信令服务器程序（signaling\\WindowShare.Signaling.exe），无法启动");
+                return false;
             }
 
             BtnSignalingLocal.Content = "启动中…";
@@ -647,21 +683,19 @@ public partial class MainWindow : Window
                 if (await IsOurSignalingUpAsync())
                 {
                     MarkLocalSignalingRunning(proc);
-                    return;
+                    return true;
                 }
             }
 
             ResetLocalSignalingButton();
-            MessageBox.Show(this,
-                "信令服务器 12 秒内未就绪（5000 端口可能被其他程序占用）。\n详见日志，或手动运行 signaling\\WindowShare.Signaling.exe 查看报错。",
-                "启动失败", MessageBoxButton.OK, MessageBoxImage.Warning);
+            Logger.Warn("Host", "本机信令服务器 12 秒内未就绪（5000 端口可能被其他程序占用）");
+            return false;
         }
         catch (Exception ex)
         {
             ResetLocalSignalingButton();
             Logger.Error("Host", "本机信令服务器启动失败", ex);
-            MessageBox.Show(this, $"本机信令服务器启动失败：{ex.Message}", "错误",
-                MessageBoxButton.OK, MessageBoxImage.Error);
+            return false;
         }
     }
 
