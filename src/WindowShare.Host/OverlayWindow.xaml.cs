@@ -59,7 +59,7 @@ public partial class OverlayWindow : Window
     }
 
     private static string Truncate(string s, int max) =>
-        s.Length <= max ? s[..max] : s[..(max - 1)] + "…";
+        s.Length <= max ? s : s[..(max - 1)] + "…";
 
     private void Window_MouseLeftButtonDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
     {

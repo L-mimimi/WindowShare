@@ -6,12 +6,12 @@ Windows 只读屏幕/窗口共享软件：**Host 端**捕获整个屏幕或指�
 
 ## 下载（Windows x64）
 
-最新版本 **v1.3.3** ｜ [全部发布版本](https://github.com/L-mimimi/WindowShare/releases)
+最新版本 **v1.3.4** ｜ [全部发布版本](https://github.com/L-mimimi/WindowShare/releases)
 
 | 类型 | 文件 | 大小 | 说明 |
 |------|------|------|------|
-| 安装版 | [WindowShare-Setup-1.3.3.exe](https://github.com/L-mimimi/WindowShare/releases/download/v1.3.3/WindowShare-Setup-1.3.3.exe) | 88.0 MB | Inno Setup per-user 安装，**无需管理员权限**；数据写入 `%APPDATA%\WindowShare` |
-| 便携版 | [WindowShare-Portable-1.3.3.zip](https://github.com/L-mimimi/WindowShare/releases/download/v1.3.3/WindowShare-Portable-1.3.3.zip) | 122.4 MB | 解压即用，可放 U 盘；数据全部存于程序目录 `data\` |
+| 安装版 | [WindowShare-Setup-1.3.4.exe](https://github.com/L-mimimi/WindowShare/releases/download/v1.3.4/WindowShare-Setup-1.3.4.exe) | 88.0 MB | Inno Setup per-user 安装，**无需管理员权限**；数据写入 `%APPDATA%\WindowShare` |
+| 便携版 | [WindowShare-Portable-1.3.4.zip](https://github.com/L-mimimi/WindowShare/releases/download/v1.3.4/WindowShare-Portable-1.3.4.zip) | 122.4 MB | 解压即用，可放 U 盘；数据全部存于程序目录 `data\` |
 
 两者均为 self-contained（win-x64），目标机器**无需预装 .NET 运行时**。系统要求：Windows 10 1903（10.0.18362）或更高。
 
@@ -21,6 +21,10 @@ Windows 只读屏幕/窗口共享软件：**Host 端**捕获整个屏幕或指�
 49cc6c9e3888ac8a3dc3e2f1ed3c5eba119ff9ad259b853f10f2a803a0d3d1d4  WindowShare-Setup-1.3.3.exe
 71464bc9e99c36dc0ce5590d61d14de133a5ac782e3d6649f92e9d90f5359d0d  WindowShare-Portable-1.3.3.zip
 ```
+
+## 1.3.4 更新
+
+- **修复共享悬浮条崩溃（重要，1.3.3 引入）**：v1.3.3 重构悬浮条时 `Truncate` 的短标题分支越界——显示器源的标题（如「显示器 1 (1920×1080)」，17 字符）短于 20 字上限时，创建悬浮条即抛 `ArgumentOutOfRangeException`，且全局兜底会在每次刷新时弹出错误提示。已恢复短标题直接返回的原逻辑（v1.3.2 行为），并用 STA 探针直接构造真实悬浮条回归验证。建议 1.3.3 用户升级。
 
 ## 1.3.3 更新
 
