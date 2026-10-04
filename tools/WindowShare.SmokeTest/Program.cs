@@ -28,8 +28,12 @@ namespace WindowShare.SmokeTest;
 /// </summary>
 public static class Program
 {
-    public static int Main()
+    public static int Main(string[] args)
     {
+        // HEVC 解码能力探针模式（子进程；部分平台扩展 MFT 会原生崩溃，需隔离）
+        if (args.Contains(HevcDecodeProbe.ArgProbe))
+            return HevcDecodeProbe.TryProbe() ? 0 : HevcDecodeProbe.ExitUnsupported;
+
         Logger.Initialize(LogLevel.Debug);
         Logger.Info("SmokeTest", "===== WindowShare 冒烟测试开始 =====");
         AppPaths.EnsureDirectories();
@@ -40,6 +44,7 @@ public static class Program
             Part1Probe();
             var ok2 = RunPart("Part2", Part2SyntheticEncode);
             var ok2b = RunPart("Part2b", Part2bHighResAndHighFps);
+            var ok2c = RunPart("Part2c", Part2cHevcRoundtrip);
             var ok3 = RunPart("Part3", Part3RealCapture);
             var ok4 = RunPart("Part4", Part4LoopbackE2E);
             var ok5 = RunPart("Part5", Part5Signaling);
@@ -48,11 +53,11 @@ public static class Program
             var ok8 = RunPart("Part8", Part8Discovery);
             Logger.Info("SmokeTest",
                 $"===== 结果: 合成编码={(ok2 ? "PASS" : "FAIL")}, " +
-                $"4K/高帧率={(ok2b ? "PASS" : "FAIL")}, " +
+                $"4K/高帧率={(ok2b ? "PASS" : "FAIL")}, HEVC往返={(ok2c ? "PASS" : "FAIL")}, " +
                 $"真实捕获={(ok3 ? "PASS" : "FAIL")}, 回环端到端={(ok4 ? "PASS" : "FAIL")}, " +
                 $"信令={(ok5 ? "PASS" : "FAIL")}, WebRTC={(ok6 ? "PASS" : "FAIL")}, " +
                 $"系统声音={(ok7 ? "PASS" : "FAIL")}, 局域网发现={(ok8 ? "PASS" : "FAIL")} =====");
-            return ok2 && ok2b && ok3 && ok4 && ok5 && ok6 && ok7 && ok8 ? 0 : 1;
+            return ok2 && ok2b && ok2c && ok3 && ok4 && ok5 && ok6 && ok7 && ok8 ? 0 : 1;
         }
         catch (Exception ex)
         {
@@ -261,6 +266,115 @@ public static class Program
 
         Logger.Info("Part3", ok ? "Part3 PASS" : "Part3 FAIL");
         return ok;
+    }
+
+    /// <summary>
+    /// HEVC 编解码验证（平台支持时）：
+    ///   1) 编码：合成运动图像 → HEVC 编码（实测 fps/码率，评估软件编码器能否跟上实时共享）；
+    ///   2) 解码：子进程探针实测本机 HEVC 解码能力（部分平台扩展 MFT 会原生崩溃，必须隔离）；
+    ///   3) 两者皆可用时做完整 编码→解码 回读。
+    /// 无 HEVC 编码器时软性通过（会话自动回退 H.264）。
+    /// </summary>
+    private static bool Part2cHevcRoundtrip()
+    {
+        Logger.Info("Part2c", "---- HEVC 编解码验证（1280x720@30, 5 秒）----");
+        var settings = new EncoderSettings
+        {
+            Codec = VideoCodec.Hevc,
+            Width = 1280,
+            Height = 720,
+            Fps = 30,
+            BitrateBps = 3_000_000,
+            GopSize = 60,
+        };
+
+        if (!MfVideoEncoder.ProbeAvailable(settings))
+        {
+            Logger.Info("Part2c", "平台无可用 HEVC 编码器 → 跳过（会话仍可用 H.264）");
+            Logger.Info("Part2c", "Part2c PASS（软性）");
+            return true;
+        }
+
+        // 子进程实测解码能力（原生崩溃被隔离在子进程）
+        var decodeOk = ProbeHevcDecodeInSubprocess();
+        Logger.Info("Part2c", $"HEVC 解码能力（子进程探针）: {(decodeOk ? "可用" : "不可用/崩溃隔离")}");
+
+        var decoded = 0;
+        var keyframes = 0;
+        using var pipeline = new EncoderPipeline(settings);
+        MfVideoDecoder? decoder = decodeOk ? new MfVideoDecoder(VideoCodec.Hevc) : null;
+        if (decoder != null) decoder.Decoded += _ => Interlocked.Increment(ref decoded);
+        try
+        {
+            pipeline.Encoded += f =>
+            {
+                if (f.Keyframe) Interlocked.Increment(ref keyframes);
+                decoder?.Decode(f.Data, f.TimestampUtc);
+            };
+
+            const int width = 1280, height = 720, fps = 30;
+            var bgra = new byte[width * height * 4];
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var frameInterval = TimeSpan.FromMilliseconds(1000.0 / fps);
+            while (sw.Elapsed < TimeSpan.FromSeconds(5))
+            {
+                DrawPattern(bgra, width, height, sw.Elapsed.TotalSeconds);
+                pipeline.Submit(new CaptureFrame
+                {
+                    Width = width,
+                    Height = height,
+                    TimestampUtc = DateTime.UtcNow.Ticks,
+                    QpcTimestamp = System.Diagnostics.Stopwatch.GetTimestamp(),
+                    BgraPixels = (byte[])bgra.Clone(),
+                });
+                Thread.Sleep(Math.Max(1, (int)frameInterval.TotalMilliseconds));
+            }
+            Thread.Sleep(800);
+
+            var (encFrames, encBytes) = pipeline.GetCounters();
+            decoder?.Flush();
+            var bitrate = encBytes * 8.0 / 5.0;
+            Logger.Info("Part2c",
+                $"编码器={pipeline.EncoderName}, 编码 {encFrames} 帧（实际 {encFrames / 5.0:F0}fps）, " +
+                $"关键帧 {keyframes}, 平均码率 {bitrate / 1_000_000:F2} Mbps" +
+                $"（实测/目标 = {bitrate / settings.BitrateBps:P0}）");
+            if (decodeOk) Logger.Info("Part2c", $"解码回读 {decoded} 帧（HEVC 解码器）");
+
+            var pass = encFrames >= 20 && keyframes >= 1 && (!decodeOk || decoded >= 15);
+            Logger.Info("Part2c", pass ? "Part2c PASS" : "Part2c FAIL");
+            return pass;
+        }
+        finally
+        {
+            decoder?.Dispose();
+        }
+    }
+
+    /// <summary>以子进程方式实测 HEVC 解码能力（扩展 MFT 的原生崩溃被隔离在子进程）</summary>
+    private static bool ProbeHevcDecodeInSubprocess()
+    {
+        try
+        {
+            var exe = Environment.ProcessPath;
+            if (string.IsNullOrEmpty(exe)) return false;
+            using var ps = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(
+                exe, HevcDecodeProbe.ArgProbe)
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            });
+            if (ps == null) return false;
+            if (!ps.WaitForExit(20000))
+            {
+                try { ps.Kill(entireProcessTree: true); } catch { }
+                return false;
+            }
+            return ps.ExitCode == HevcDecodeProbe.ExitOk;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     /// <summary>画一个随时间移动的测试图案</summary>

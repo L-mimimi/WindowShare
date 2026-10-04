@@ -1,4 +1,5 @@
 using System.Windows;
+using WindowShare.Core.Decoding;
 using WindowShare.Core.Logging;
 using WindowShare.Core.Utils;
 
@@ -26,6 +27,15 @@ public partial class App : Application
 
         AppPaths.EnsureDirectories();
         Logger.Initialize(LogLevel.Info);
+
+        // HEVC 解码能力探针模式（由主进程以子进程方式拉起；结果走退出码）
+        if (e.Args.Contains(HevcDecodeProbe.ArgProbe))
+        {
+            Environment.Exit(HevcDecodeProbe.TryProbe()
+                ? HevcDecodeProbe.ExitOk
+                : HevcDecodeProbe.ExitUnsupported);
+        }
+
         Logger.Info("App", "窗享 合并入口已启动");
         Logger.Info("App", $"{AppPaths.ModeDescription}：{AppPaths.Root}");
 

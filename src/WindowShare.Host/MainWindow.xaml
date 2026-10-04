@@ -31,6 +31,10 @@
                     <Button DockPanel.Dock="Right" x:Name="BtnToggleShare" Width="120" Margin="8,0"
                             Background="#1E88E5" Foreground="White" FontWeight="Bold"
                             Content="开始共享" Click="BtnToggleShare_Click"/>
+                    <CheckBox DockPanel.Dock="Right" x:Name="ChkPreferHevc" Content="HEVC 优先"
+                              VerticalAlignment="Center" Margin="8,0"
+                              Checked="Setting_Changed" Unchecked="Setting_Changed"
+                              ToolTip="本机有可用 HEVC 编码器时以 HEVC 共享：同画质约省 30–50% 码率（网络受限时更清晰）。&#10;仅 1.4.0+ 且实测支持 HEVC 解码的观看端能接入，其他观看端会被提示升级；取消勾选恢复 H.264 兼容所有版本。"/>
                     <CheckBox DockPanel.Dock="Right" x:Name="ChkRecord" Content="编码验证(写H.264)"
                               VerticalAlignment="Center" Margin="8,0"
                               Checked="Setting_Changed" Unchecked="Setting_Changed"/>

@@ -18,6 +18,12 @@ public sealed class ViewerSettings
 
     public bool PlayAudio { get; set; } = true;
 
+    /// <summary>
+    /// HEVC 解码能力（子进程探针实测后缓存；null=尚未探测，下次启动后台补测）。
+    /// 探测可能触发部分平台扩展 MFT 的原生崩溃，因此永远在子进程进行并缓存结论。
+    /// </summary>
+    public bool? HevcDecodeSupported { get; set; }
+
     public static ViewerSettings Load() =>
         JsonSettingsStore.Load<ViewerSettings>(AppPaths.ViewerSettingsFile);
 

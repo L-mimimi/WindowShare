@@ -256,7 +256,7 @@ public sealed class ShareSession : IDisposable
             IsSharing = true;
             _statsTimer = new Timer(_ => OnStatsTick(), null, 1000, 1000);
             Logger.Info("Session",
-                $"共享已开始: 房间号={RoomCode}, {encWidth}x{encHeight}@{fps}fps {options.BitrateBps / 1000}kbps, " +
+                $"共享已开始: 房间号={RoomCode}, {options.Codec.DisplayName()} {encWidth}x{encHeight}@{fps}fps {options.BitrateBps / 1000}kbps, " +
                 $"编码器={EncoderName}, 硬件={IsHardwareEncoder}, 零拷贝={IsZeroCopy}" +
                 $"，系统声音={(AudioInfo.Enabled ? AudioInfo.EncoderName : "未共享")}");
         }

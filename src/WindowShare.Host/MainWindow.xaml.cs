@@ -136,6 +136,7 @@ public partial class MainWindow : Window
             CboFps.SelectedIndex = Math.Clamp(_settings.FpsIndex, 0, VideoFormatPlanner.FpsTiers.Length - 1);
             ChkAudio.IsChecked = _settings.ShareAudio;
             ChkRecord.IsChecked = _settings.RecordForValidation;
+            ChkPreferHevc.IsChecked = _settings.PreferHevc;
             ChkSignaling.IsChecked = _settings.EnableSignaling;
             ChkMinToTray.IsChecked = _settings.MinimizeToTray;
             ChkDiscoverable.IsChecked = _settings.Discoverable;
@@ -170,6 +171,7 @@ public partial class MainWindow : Window
         _settings.FpsIndex = Math.Max(0, CboFps.SelectedIndex);
         _settings.ShareAudio = ChkAudio.IsChecked == true;
         _settings.RecordForValidation = ChkRecord.IsChecked == true;
+        _settings.PreferHevc = ChkPreferHevc.IsChecked == true;
         _settings.EnableSignaling = ChkSignaling.IsChecked == true;
         _settings.MinimizeToTray = ChkMinToTray.IsChecked == true;
         _settings.Discoverable = ChkDiscoverable.IsChecked == true;
@@ -361,11 +363,32 @@ public partial class MainWindow : Window
         var (plannedWidth, plannedHeight) = VideoFormatPlanner.FitToWidth(
             source.Bounds.Width, source.Bounds.Height, SelectedWidth);
         var fps = SelectedFps;
+
+        // 会话编码决策：勾选「HEVC 优先」且本机有可用 HEVC 编码器 → HEVC（同画质省 30–50% 码率，
+        // 仅 1.4.0+ 观看端可接入）；否则 H.264（兼容一切版本）。探针失败自动回退，不阻断共享。
+        var codec = VideoCodec.H264;
+        if (ChkPreferHevc.IsChecked == true)
+        {
+            var hevcProbe = new EncoderSettings
+            {
+                Codec = VideoCodec.Hevc,
+                Width = plannedWidth,
+                Height = plannedHeight,
+                Fps = fps,
+                BitrateBps = VideoFormatPlanner.SuggestBitrateBps(plannedWidth, plannedHeight, fps),
+            };
+            if (MfVideoEncoder.ProbeAvailable(hevcProbe))
+                codec = VideoCodec.Hevc;
+            else
+                Logger.Warn("Host", "本机无可用 HEVC 编码器，本次共享回退 H.264（观看端兼容性最好）");
+        }
+
         var options = new ShareOptions
         {
             Width = SelectedWidth,
             Fps = fps,
             BitrateBps = VideoFormatPlanner.SuggestBitrateBps(plannedWidth, plannedHeight, fps),
+            Codec = codec,
             RecordForValidation = ChkRecord.IsChecked == true,
             RecordFilePath = Path.Combine(AppPaths.Recordings, $"share-{DateTime.Now:yyyyMMdd-HHmmss}.h264"),
             ShareAudio = ChkAudio.IsChecked == true,
@@ -751,6 +774,15 @@ public partial class MainWindow : Window
             switch (type)
             {
                 case "webrtc-request":
+                    // HEVC 会话不走 WebRTC（v1.4：RTP 打包器按 H.264 语义处理 NAL，
+                    // 载 HEVC 会损坏码流）；引导观看端改用局域网直连或 Host 关闭 HEVC 优先。
+                    if (_session?.Options?.Codec == VideoCodec.Hevc)
+                    {
+                        Logger.Warn("Host", "观看端请求 WebRTC，但当前会话为 HEVC 编码（WebRTC 暂不支持 HEVC），已拒绝");
+                        await _signaling?.RelayToViewerAsync(viewerId ?? "", "webrtc-reject",
+                            "Host 正在以 HEVC 编码共享，跨网段观看暂不支持；请在局域网内直连，或 Host 取消「HEVC 优先」")!;
+                        break;
+                    }
                     _webRtcViewerId = viewerId;
                     if (_webRtcSink != null) _session?.RemoveSink(_webRtcSink);
                     _webRtcSink = null;

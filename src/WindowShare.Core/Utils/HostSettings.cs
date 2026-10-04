@@ -25,6 +25,12 @@ public sealed class HostSettings
     public bool Discoverable { get; set; } = true;
 
     /// <summary>
+    /// HEVC 优先（1.4.0 起）：本机有可用 HEVC 编码器时以 HEVC 开启会话，同画质约省 30–50% 码率。
+    /// 仅 1.4.0+ 且实测支持 HEVC 解码的观看端能接入；关 = 永远 H.264（兼容所有版本）。
+    /// </summary>
+    public bool PreferHevc { get; set; }
+
+    /// <summary>
     /// LAN 共享监听地址（高级项，一般不改配置文件）：填本机某个 IPv4（如 192.168.1.10）
     /// 则只在该网卡监听；空 = 所有网卡。
     /// </summary>

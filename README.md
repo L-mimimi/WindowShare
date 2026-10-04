@@ -6,12 +6,12 @@ Windows 只读屏幕/窗口共享软件：**Host 端**捕获整个屏幕或指�
 
 ## 下载（Windows x64）
 
-最新版本 **v1.3.5** ｜ [全部发布版本](https://github.com/L-mimimi/WindowShare/releases)
+最新版本 **v1.4.0** ｜ [全部发布版本](https://github.com/L-mimimi/WindowShare/releases)
 
 | 类型 | 文件 | 大小 | 说明 |
 |------|------|------|------|
-| 安装版 | [WindowShare-Setup-1.3.5.exe](https://github.com/L-mimimi/WindowShare/releases/download/v1.3.5/WindowShare-Setup-1.3.5.exe) | 88.0 MB | Inno Setup per-user 安装，**无需管理员权限**；数据写入 `%APPDATA%\WindowShare` |
-| 便携版 | [WindowShare-Portable-1.3.5.zip](https://github.com/L-mimimi/WindowShare/releases/download/v1.3.5/WindowShare-Portable-1.3.5.zip) | 122.4 MB | 解压即用，可放 U 盘；数据全部存于程序目录 `data\` |
+| 安装版 | [WindowShare-Setup-1.4.0.exe](https://github.com/L-mimimi/WindowShare/releases/download/v1.4.0/WindowShare-Setup-1.4.0.exe) | 88.0 MB | Inno Setup per-user 安装，**无需管理员权限**；数据写入 `%APPDATA%\WindowShare` |
+| 便携版 | [WindowShare-Portable-1.4.0.zip](https://github.com/L-mimimi/WindowShare/releases/download/v1.4.0/WindowShare-Portable-1.4.0.zip) | 122.4 MB | 解压即用，可放 U 盘；数据全部存于程序目录 `data\` |
 
 两者均为 self-contained（win-x64），目标机器**无需预装 .NET 运行时**。系统要求：Windows 10 1903（10.0.18362）或更高。
 
@@ -21,6 +21,14 @@ Windows 只读屏幕/窗口共享软件：**Host 端**捕获整个屏幕或指�
 5714da0fc3dc95e335c2ddd8ca6e277aab681f7b433bc51315845f377213c42d  WindowShare-Setup-1.3.5.exe
 8a5b173fc3c33d86586f276f1e660f799760379d91a404e137be4dcad6fd88a0  WindowShare-Portable-1.3.5.zip
 ```
+
+## 1.4.0 更新
+
+- **HEVC 编码支持（可选增强，默认关闭）**：Host 界面新增「HEVC 优先」开关——勾选且本机有可用 HEVC 编码器时以 HEVC 开启会话，**同画质约省 30–50% 码率**（网络受限场景更清晰）；探针失败自动回退 H.264，不影响共享。
+- **观看端能力协商**：观看端以**子进程探针**实测本机 HEVC 解码能力（部分平台商店扩展解码 MFT 会原生崩溃，隔离在子进程，结论缓存）；HEVC 会话仅放行实测支持的观看端，不支持的会收到明确提示（升级观看端或取消「HEVC 优先」）。旧版本观看端接入 HEVC 会话同样被拒并提示。
+- **平台自适应**：编码器/解码器候选链按目标编码筛选（硬件 MFT → DX12 包装器 → 商店扩展/软件），关键帧判定、参数集解析、GOP 补发全部按 HEVC NAL 语义（2 字节头、IRAP 16–21、VPS/SPS/PPS）处理。
+- **限制**：跨网段观看（WebRTC 通道）暂不支持 HEVC 会话——Host 会明确拒绝并提示改用局域网直连或取消「HEVC 优先」；HEVC 编码器缺硬 MFT 的机器（本机实测）走商店扩展软件编码，帧率有限，HEVC 优先更适合「牺牲帧率换码率」或未来有硬件 HEVC MFT 的机器。
+- 协议文档已同步：`docs/PROTOCOL.md`（AuthRequest.hevc / AuthResult.vcodec / webrtc-reject）。
 
 ## 1.3.5 更新
 

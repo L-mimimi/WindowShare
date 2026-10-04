@@ -22,17 +22,17 @@
 
 | 值 | 名称 | 方向 | 负载 |
 |----|------|------|------|
-| 1 | AuthRequest | V→H | JSON：deviceId/deviceName/proto/roomCode |
+| 1 | AuthRequest | V→H | JSON：deviceId/deviceName/proto/roomCode；1.4.0 起追加 hevc（观看端实测支持 HEVC 解码，老版本不带 = false） |
 | 2 | AuthChallenge | H→V | JSON：salt(B64)/enc(是否支持加密)/hostPub(ECDH P-256 SPKI, B64) |
 | 3 | AuthProof | V→H | JSON：proof(HMAC)/clientPub(B64) |
-| 4 | AuthResult | H→V | JSON：ok/reason/enc/encoder/width/height；1.2.0 起追加 audio/audioRate/audioCh/audioCodec/audioEnc（老版本 Host 不带这些字段，Viewer 按「无音频」处理） |
+| 4 | AuthResult | H→V | JSON：ok/reason/enc/encoder/width/height；1.2.0 起追加 audio/audioRate/audioCh/audioCodec/audioEnc（老版本 Host 不带这些字段，Viewer 按「无音频」处理）；1.4.0 起追加 bitrate/fps/vcodec（会话编码 "h264"/"hevc"，老版本 Viewer 按 H.264 处理） |
 | 10 | Ping | V→H | 8 字节时间戳 |
 | 11 | Pong | H→V | 原样返回（V 计算 RTT） |
 | 12 | KeyframeRequest | V→H | 空（Host 请求下一帧为 IDR；部分编码器不认该 CODECAPI，此时由 GOP 补发兜底，见下） |
 | 13 | Bye | 双向 | 空（优雅断开） |
 | 14 | ShareStopped | H→V | JSON：reason |
 | 15 | StatsInfo | 双向 | JSON：H→V encoder/hw/source；V→H rttMs（拥塞反馈） |
-| 20 | VideoFrame | H→V | H.264 Annex-B 访问单元（1 帧） |
+| 20 | VideoFrame | H→V | 视频编码 Annex-B 访问单元（1 帧）；编码由 AuthResult 的 `vcodec` 协商（h264/hevc），NAL 头语义随编码不同（H.264 1 字节头，HEVC 2 字节头） |
 | 21 | RawFrame | H→V | 未编码 BGRA（仅测试通路用） |
 | 22 | AudioFrame | H→V | 系统声音：ADTS 封装的 AAC-LC（48 kHz / 立体声 / 128 kbps）；帧头 TimestampUtc 是该帧第一个采样点的**采集时刻** |
 
@@ -111,6 +111,13 @@ Viewer                                   Host
 - 算法：AES-256-GCM（tag 16B，nonce 12B 随机）。
 - 报文：`[12B nonce][密文][16B tag]`，帧头 Flags.Encrypted=1。
 - 覆盖范围：VideoFrame、AudioFrame、RawFrame、StatsInfo 负载。握手消息（AuthRequest / AuthChallenge / AuthProof / AuthResult）必须明文——密钥本身就是在握手过程中协商出来的；Ping / Pong / Bye 不含内容，同样明文。
+
+### 会话编码协商（1.4.0 起）
+
+- Host 开始共享时决定**会话级**编码（勾选「HEVC 优先」且探针实测本机有可用 HEVC 编码器 → HEVC，否则 H.264），编码随 AuthResult 的 `vcodec` 下发。
+- Viewer 在 AuthRequest 携带 `hevc` 能力位：由**子进程探针**实测得出（`WindowShare.Viewer.exe --probe-hevc` / 合并入口同参数）——部分平台的商店扩展 HEVC 解码 MFT 在 `ProcessMessage` 阶段原生崩溃（AccessViolation，.NET 不可捕获），子进程隔离后以退出码承载结论（0=支持，其他=不支持），并缓存进 viewer-settings.json。
+- HEVC 会话仅放行 `hevc=true` 的观看端；不支持的观看端在认证阶段收到明确的拒绝原因（老版本 Viewer 不带能力位，同样被拒——升级观看端或 Host 取消「HEVC 优先」即可恢复）。
+- WebRTC（跨网段/房间号回退通道）暂不支持 HEVC 会话：H.264 RTP 打包器按 1 字节 NAL 头语义分包，载 HEVC 会损坏码流，Host 对 `webrtc-request` 回 `webrtc-reject` 中继消息说明原因。
 
 ## 4. 信令服务器协议（SignalR，`/signalr`）
 

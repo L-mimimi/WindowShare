@@ -68,21 +68,23 @@
 - [ ] **自动更新提示**：启动时查 GitHub latest release，有新版弹提示（不自动下载）
 - [ ] 若 CodecAPI 攻坚成功且实测码率回到规划量级：规划 bpp 0.14 → 0.25
 
-## 中期：HEVC 支持（1.4.0 专项，质变级）
+## 中期：HEVC 支持（1.4.0，已于 2026-10-04 落地）
 
-**动机**：同画质 HEVC 比 H.264 省 30–50% 码率。带宽受限场景（Wi-Fi/Wi-Fi，本例 ~2 Mbps）
-下，H.264 已经没得抠，编解码效率就是清晰度的天花板。两端都是自家程序、编解码都走
-Media Foundation，无互通包袱；绝大多数独显/核显都有 HEVC 硬件编解码器。
+**动机**：同画质 HEVC 比 H.264 省 30–50% 码率。带宽受限场景（Wi-Fi/Wi-Fi）下，H.264 已经没得抠，编解码效率就是清晰度的天花板。
 
-**设计草案**：
-1. 编码器选择链：HEVC 硬件 MFT → H.264 硬件 MFT → HEVC 软 MFT → H.264 软 MFT
-   （`MFVideoFormat_HEVC`，编码侧与现有 MfH264Encoder 同构，抽公共基类）
-2. 协议：AuthResult 增加 `videoCodec` 字段（先例：audioCodec），Viewer 按它选解码 MFT；
-   LAN 帧格式无需变化（Annex-B/HVCC 均为裸流）
-3. WebRTC：动态 PT 换 HEVC（两端自研，同 H.264 PT 96 先例）；SDP fmtp 相应调整
-4. Viewer：解码器探测 + 不支持 HEVC 时提示 / Host 端自动回退 H.264
-5. 预估工程量：2–4 天；风险点：各厂商 HEVC MFT 的 CodecAPI 支持度差异（现有
-   "尽力而为"模式已覆盖）
+**平台实测结论（2026-10-04，RTX 5060 + Win11 24H2）**：
+- 编码：NVIDIA 新驱动不注册 MFT，走 Windows 收件箱的 D3D12 包装器；本机只有 "Microsoft AVC DX12 Encoder"，无 "Microsoft HEVC DX12 Encoder"。可用的是商店扩展 **HEVCVideoExtensionEncoder**（软件路径，720p30 实测约 19fps，跟不上高帧率实时共享；同码率画质仍优于 H.264）。
+- 解码：收件箱 HEVC 解码器缺席；商店扩展 "HEVCVideoExtension" 可用但**必须用 MFT 自报的输入类型**（手工拼类型一律被拒），且其 `ProcessMessage` 在部分配置下原生崩溃（AccessViolation，.NET 不可捕获）。
+- 工程对策：① Viewer 的 HEVC 解码能力用**子进程探针**实测（自 spawn `--probe-hevc`，崩溃隔离在子进程，结论缓存进设置）；② HEVC 候选解码器用 MFT 自报类型回设；③ 会话级编码协商 + 能力拒接；④ WebRTC 通道 v1.4 不支持 HEVC（H.264 RTP 打包器语义不兼容），HEVC 会话对 `webrtc-request` 回 `webrtc-reject`。
+
+**设计落地**：
+1. 编码器链：HEVC 候选（硬件 MFT → HEVC DX12 → 扩展/软件）按名字 + 试配类型筛选；`MfVideoEncoder.ProbeAvailable` 供 Host 开共享前决策，失败自动回退 H.264
+2. 协议：AuthRequest `hevc` 能力位（子进程探针实测）、AuthResult `vcodec`（"h264"/"hevc"）；LAN 帧格式不变（Annex-B 裸流，NAL 头语义随编码）
+3. Viewer：按协商结果换解码器（MfVideoDecoder(Hevc)），状态栏显示传输通道 + HEVC 标识
+4. Host UI：「HEVC 优先」开关（默认关，兼容性最好）；开启且平台支持时 HEVC 会话生效
+5. 风险点：各厂商 HEVC MFT 的 CodecAPI 支持度差异（现有"尽力而为"诊断日志已覆盖）
+
+**后续**：硬件 HEVC 机器（有厂商 MFT 或未来 Windows 提供 HEVC DX12 包装器）上 HEVC 优先能同时保住帧率与画质；WebRTC + HEVC 需要自定义 RTP 打包器（RFC 7798），单独立项。
 
 ## 远期 / 大专项
 

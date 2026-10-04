@@ -5,6 +5,7 @@ using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using WindowShare.Core.Audio;
 using WindowShare.Core.Decoding;
+using WindowShare.Core.Encoding;
 using WindowShare.Core.Logging;
 
 using WindowShare.Core.Network;
@@ -34,6 +35,10 @@ public partial class MainWindow : Window
     /// <summary>Host 侧画质参数（StatsInfo 周期携带；0=未知，如旧版 Host 或 WebRTC 路径）</summary>
     private int _hostTargetBitrateBps;
     private bool _hostDowngraded;
+    /// <summary>当前解码器对应的编码（Host 协商为 HEVC 时自动换解码器）</summary>
+    private VideoCodec _decoderCodec = VideoCodec.H264;
+    /// <summary>HEVC 解码能力（子进程探针实测；null=探测中/未知 → 按 H.264 观看端接入）</summary>
+    private bool? _hevcSupported;
     /// <summary>系统声音播放管线（解码 + 抖动缓冲 + 渲染 + 音画同步主时钟）</summary>
     private AudioPlaybackPipeline? _audio;
     /// <summary>待上屏的解码帧队列（音画同步需要「等到点再上屏」，不能在解码回调里直接画）</summary>
@@ -51,6 +56,7 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        _ = ProbeHevcCapabilityAsync(); // 后台子进程探测，结果缓存进设置
         _uiTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
         _uiTimer.Tick += (_, _) => UpdateStatsBar();
         _uiTimer.Start();
@@ -256,6 +262,7 @@ public partial class MainWindow : Window
         TeardownSession();
 
         _firstKeyframeSeen = false;
+        _decoderCodec = VideoCodec.H264;
         _decoder = new MfVideoDecoder();
         _decoder.Decoded += OnDecodedFrame;
         StartPresentThread();
@@ -265,11 +272,55 @@ public partial class MainWindow : Window
         TxtPlaceholder.Visibility = Visibility.Collapsed;
     }
 
+    /// <summary>
+    /// 子进程实测本机 HEVC 解码能力并缓存。探测可能触发部分平台扩展 MFT 的
+    /// 原生崩溃（AccessViolation 不可捕获），所以必须在子进程做，主进程零风险。
+    /// </summary>
+    private async System.Threading.Tasks.Task ProbeHevcCapabilityAsync()
+    {
+        if (_settings.HevcDecodeSupported is bool cached)
+        {
+            _hevcSupported = cached;
+            Logger.Info("Viewer", $"HEVC 解码能力（缓存）: {(cached ? "支持" : "不支持")}");
+            return;
+        }
+        try
+        {
+            var exe = Environment.ProcessPath;
+            if (string.IsNullOrEmpty(exe)) return;
+            using var ps = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(
+                exe, HevcDecodeProbe.ArgProbe)
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            });
+            if (ps == null) return;
+            if (!ps.WaitForExit(20000))
+            {
+                try { ps.Kill(entireProcessTree: true); } catch { }
+                return;
+            }
+            _hevcSupported = ps.ExitCode == HevcDecodeProbe.ExitOk;
+            _settings.HevcDecodeSupported = _hevcSupported;
+            _settings.Save();
+            Logger.Info("Viewer", $"HEVC 解码能力探测: {(_hevcSupported == true ? "支持" : "不支持")}" +
+                                  $"（exit={ps.ExitCode}）");
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn("Viewer", $"HEVC 解码能力探测失败（按不支持处理）: {ex.Message}");
+        }
+        await System.Threading.Tasks.Task.CompletedTask;
+    }
+
     /// <summary>直连 IP：建立 LAN TCP 会话（调用前需先 PrepareSession）</summary>
     private void StartSession(string host, int port, string password)
     {
         _client = new LanShareClient(host, port,
-            AppPaths.GetOrCreateDeviceId(), AppPaths.GetMachineName(), password);
+            AppPaths.GetOrCreateDeviceId(), AppPaths.GetMachineName(), password)
+        {
+            HevcSupported = _hevcSupported == true,
+        };
         AttachClient(_client);
         _client.Start();
     }
@@ -311,7 +362,10 @@ public partial class MainWindow : Window
             if (parts.Length != 2 || !int.TryParse(parts[1], out var port)) continue;
 
             var client = new LanShareClient(parts[0], port,
-                AppPaths.GetOrCreateDeviceId(), AppPaths.GetMachineName(), password);
+                AppPaths.GetOrCreateDeviceId(), AppPaths.GetMachineName(), password)
+            {
+                HevcSupported = _hevcSupported == true,
+            };
             AttachClient(client);
 
             var connected = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -383,6 +437,11 @@ public partial class MainWindow : Window
         {
             switch (type)
             {
+                case "webrtc-reject":
+                    // Host 拒绝 WebRTC（如 HEVC 会话）：给出可操作的原因
+                    TxtState.Text = $"状态：跨网段观看被拒（{payload}）";
+                    Logger.Warn("Viewer", $"WebRTC 请求被 Host 拒绝: {payload}");
+                    break;
                 case "offer":
                     if (_webRtcReceiver == null)
                     {
@@ -480,17 +539,19 @@ public partial class MainWindow : Window
         TxtEncoder.Text = "编码器：-";
         _hostTargetBitrateBps = 0;
         _hostDowngraded = false;
+        _decoderCodec = VideoCodec.H264;
     }
 
     // ===== 数据流 =====
 
-    /// <summary>网络线程：H.264 帧 → 解码</summary>
+    /// <summary>网络线程：H.264/HEVC 帧 → 解码</summary>
     private void OnFrameReceived(Core.Encoding.EncodedVideoFrame frame)
     {
         try
         {
             _stats.OnFrame(frame.Data.Length);
-            if (!_firstKeyframeSeen && !frame.Keyframe)
+            var keyframe = Core.Encoding.AnnexB.IsKeyframe(frame.Data, _client?.NegotiatedCodec ?? VideoCodec.H264);
+            if (!_firstKeyframeSeen && !keyframe)
                 return; // 丢弃 IDR 之前的帧（解码器需要从关键帧开始）
             _firstKeyframeSeen = true;
             _decoder?.Decode(frame.Data, frame.TimestampUtc);
@@ -531,9 +592,42 @@ public partial class MainWindow : Window
             };
             if (state == ConnectionState.Connected)
             {
-                TxtTransport.Text = "传输：LAN TCP 直连";
+                TxtTransport.Text = "传输：LAN TCP 直连" +
+                                    (_client is { NegotiatedCodec: VideoCodec.Hevc } ? " · HEVC" : "");
                 TxtEncrypt.Text = _client?.IsEncrypted == true ? "加密：AES-256-GCM ✓" : "加密：未启用";
+                // Host 协商为 HEVC 会话而本地解码器还是 H.264 → 立即换 HEVC 解码器
+                if (_client is { NegotiatedCodec: VideoCodec.Hevc })
+                    BeginInvokeSwapDecoder(VideoCodec.Hevc);
                 TryStartAudio();
+            }
+        });
+    }
+
+    /// <summary>
+    /// 会话编码确定后按需更换解码器（Connected 时 Host 已把 GOP 补发帧发往本地，
+    /// 换码期间无法解码的帧会被丢弃并记日志，下一个 IDR/GOP 补发后恢复画面）。
+    /// </summary>
+    private void BeginInvokeSwapDecoder(VideoCodec codec)
+    {
+        Dispatcher.BeginInvoke(() =>
+        {
+            if (_decoderCodec == codec) return;
+            var old = _decoder;
+            if (old != null) old.Decoded -= OnDecodedFrame;
+            try { old?.Flush(); } catch { }
+            try { old?.Dispose(); } catch { }
+            try
+            {
+                _decoder = new MfVideoDecoder(codec);
+                _decoder.Decoded += OnDecodedFrame;
+                _decoderCodec = codec;
+                _firstKeyframeSeen = false;
+                Logger.Info("Viewer", $"会话编码为 {codec.DisplayName()}，已切换解码器");
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("Viewer", $"{codec.DisplayName()} 解码器创建失败（本机可能不支持 HEVC 解码）", ex);
+                TxtState.Text = $"状态：本机不支持 {codec.DisplayName()} 解码，无法观看本会话";
             }
         });
     }
