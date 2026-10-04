@@ -18,8 +18,8 @@ Windows 只读屏幕/窗口共享软件：**Host 端**捕获整个屏幕或指�
 校验（SHA256）：
 
 ```
-5714da0fc3dc95e335c2ddd8ca6e277aab681f7b433bc51315845f377213c42d  WindowShare-Setup-1.3.5.exe
-8a5b173fc3c33d86586f276f1e660f799760379d91a404e137be4dcad6fd88a0  WindowShare-Portable-1.3.5.zip
+d36d7f2d3d0e18aa3c4fe7a48f079e136cd98e22f6bac0a995c198c00ae22ce2  WindowShare-Setup-1.4.0.exe
+2aa8e91b898a5ec3ded5189411abc31133e25b5cadf270f00a0846b2a1713f9f  WindowShare-Portable-1.4.0.zip
 ```
 
 ## 1.4.0 更新
