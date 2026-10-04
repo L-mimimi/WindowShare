@@ -97,7 +97,11 @@ public static class Logger
                     _writer?.Dispose();
                     _writerDate = date;
                     var path = Path.Combine(Utils.AppPaths.Logs, $"windowshare-{date}.log");
-                    _writer = new StreamWriter(path, append: true) { AutoFlush = true };
+                    // FileShare.ReadWrite：合并入口允许同机并行 Host + Viewer，
+                    // 默认共享模式会让第二个进程拿不到写句柄、日志静默丢失
+                    var stream = new FileStream(path, FileMode.Append, FileAccess.Write,
+                        FileShare.ReadWrite);
+                    _writer = new StreamWriter(stream) { AutoFlush = true };
                     CleanupOldLogs();
                 }
                 _writer.WriteLine(line);

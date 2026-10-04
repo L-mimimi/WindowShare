@@ -185,7 +185,10 @@ public static class Program
         var (encFrames, encBytes) = pipeline.GetCounters();
         var bitrate = encBytes * 8.0 / seconds;
         Logger.Info("Part2", $"编码器={pipeline.EncoderName}, 硬件={pipeline.IsHardwareEncoder}, 零拷贝={pipeline.IsZeroCopy}");
-        Logger.Info("Part2", $"编码 {encFrames} 帧, {encBytes} 字节, 平均码率 {bitrate / 1_000_000:F2} Mbps");
+        // 实测/目标比：编码器欠产出的量化观察（DX12 编码器对 CodecAPI 全拒，
+        // 静态/简单内容远低于目标属已知行为，见 docs/ROADMAP.md 诊断记录）
+        Logger.Info("Part2", $"编码 {encFrames} 帧, {encBytes} 字节, 平均码率 {bitrate / 1_000_000:F2} Mbps" +
+                             $"（实测/目标 = {bitrate / settings.BitrateBps:P0}，目标 {settings.BitrateBps / 1_000_000.0:F1} Mbps）");
         Logger.Info("Part2", $"文件: {file} ({writer.Bytes} 字节, 含参数集={writer.HasParameterSets})");
 
         // 验收：帧数足够（编码器启动初期有热身+合成图像大面积静态区域会被节流）、有码流、含 SPS/PPS
