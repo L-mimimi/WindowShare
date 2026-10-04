@@ -372,7 +372,22 @@ public sealed class LanShareServer : ShareSession.IFrameSink, ShareSession.IAudi
             // 帧头 AAD 绑定 + 防重放：仅对表明 ≥1.3 的观看端启用（旧版本维持旧加密格式）
             var aadBinding = PeerCapability.SupportsAadBinding(req.AppVersion);
 
-            // 2) 白名单检查 + 必要时请求用户批准
+            // 2) 会话编码协商：HEVC 会话仅放行声明支持 HEVC 解码的观看端（老版本不带字段 = 不支持）
+            var sessionCodec = _session.Options?.Codec ?? VideoCodec.H264;
+            if (sessionCodec == VideoCodec.Hevc && !req.HevcSupported)
+            {
+                var incompatible = AuthPayload.Serialize(new AuthResultPayload
+                {
+                    Ok = false,
+                    Reason = "Host 正在以 HEVC 编码共享，观看端不支持或版本过旧；请升级观看端或在 Host 取消「HEVC 优先」",
+                });
+                conn.Send(MessageType.AuthResult, FrameFlags.None, incompatible);
+                Logging.Logger.Info("LanServer",
+                    $"已拒绝不支持 HEVC 的观看端: {req.DeviceName} ({req.DeviceId})");
+                return false;
+            }
+
+            // 3) 白名单检查 + 必要时请求用户批准
             var approved = _whitelist.IsApproved(req.DeviceId);
             if (!approved)
             {
@@ -477,6 +492,7 @@ public sealed class LanShareServer : ShareSession.IFrameSink, ShareSession.IAudi
                 Height = _session.Source?.Bounds.Height ?? 0,
                 TargetBitrateBps = _session.Options?.BitrateBps ?? 0,
                 Fps = _session.Options?.Fps ?? 0,
+                VideoCodecWireName = sessionCodec.ToWireName(),
                 AudioEnabled = audioInfo.Enabled,
                 AudioSampleRate = audioInfo.SampleRate,
                 AudioChannels = audioInfo.Channels,

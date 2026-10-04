@@ -16,6 +16,11 @@ public sealed record AuthRequestPayload
     /// Host 据此决定是否对本次连接启用「帧头 AAD 绑定 + 防重放」加密增强。
     /// </summary>
     [JsonPropertyName("ver")] public string AppVersion { get; init; } = "";
+    /// <summary>
+    /// Viewer 是否支持 HEVC 解码（1.4.0 起，子进程探针实测；老版本不带此字段 = false）。
+    /// Host 会话为 HEVC 时仅对接入能力为 true 的观看端放行。
+    /// </summary>
+    [JsonPropertyName("hevc")] public bool HevcSupported { get; init; }
 }
 
 /// <summary>Host → Viewer：认证质询（salt + 服务端能力）</summary>
@@ -59,6 +64,10 @@ public sealed record AuthResultPayload
     [JsonPropertyName("bitrate")] public int TargetBitrateBps { get; init; }
     /// <summary>配置帧率</summary>
     [JsonPropertyName("fps")] public int Fps { get; init; }
+    /// <summary>
+    /// 会话视频编码（1.4.0 起；"h264"/"hevc"。老版本 Host 不带此字段，Viewer 按 H.264 处理）
+    /// </summary>
+    [JsonPropertyName("vcodec")] public string VideoCodecWireName { get; init; } = "h264";
 
     // ===== 系统声音（1.2.0 起；老版本 Host 不带这些字段，Viewer 按「无音频」处理）=====
     /// <summary>本次会话是否共享系统声音</summary>

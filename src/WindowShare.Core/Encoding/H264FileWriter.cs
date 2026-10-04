@@ -18,8 +18,9 @@ public sealed class H264FileWriter : IDisposable
     public long Bytes => Interlocked.Read(ref _bytes);
     public bool HasParameterSets => _hasParameterSets;
 
-    public H264FileWriter(string filePath)
+    public H264FileWriter(string filePath, VideoCodec codec = VideoCodec.H264)
     {
+        Codec = codec;
         FilePath = filePath;
         var dir = Path.GetDirectoryName(filePath);
         if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
@@ -27,6 +28,9 @@ public sealed class H264FileWriter : IDisposable
         _stream = new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.Read);
         Logging.Logger.Info("H264Writer", $"开始写入: {filePath}");
     }
+
+    /// <summary>码流编码（决定参数集 NAL 类型的解析方式）</summary>
+    private VideoCodec Codec { get; }
 
     /// <summary>写入一帧码流（校验首帧含参数集/IDR）</summary>
     public void Write(EncodedVideoFrame frame)
@@ -39,7 +43,7 @@ public sealed class H264FileWriter : IDisposable
                 if (!AnnexB.IsValidStreamStart(frame.Data))
                     Logging.Logger.Warn("H264Writer", "首帧不是合法的 Annex-B 码流起始");
             }
-            if (AnnexB.ContainsParameterSets(frame.Data))
+            if (AnnexB.ContainsParameterSets(frame.Data, Codec))
                 _hasParameterSets = true;
 
             _stream.Write(frame.Data, 0, frame.Data.Length);

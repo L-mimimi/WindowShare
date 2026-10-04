@@ -22,6 +22,8 @@ public sealed record ShareOptions
     public required int Width { get; init; }
     public required int Fps { get; init; }
     public required int BitrateBps { get; init; }
+    /// <summary>会话视频编码（HEVC 仅对接入 1.4.0+ 且声明支持 HEVC 的观看端放行）</summary>
+    public VideoCodec Codec { get; init; } = VideoCodec.H264;
     /// <summary>同时写 H.264 文件（编码验证）</summary>
     public bool RecordForValidation { get; init; }
     /// <summary>录制输出路径（RecordForValidation=true 时有效）</summary>
@@ -212,6 +214,7 @@ public sealed class ShareSession : IDisposable
 
             var pipeline = new EncoderPipeline(new EncoderSettings
             {
+                Codec = options.Codec,
                 Width = encWidth,
                 Height = encHeight,
                 Fps = fps,

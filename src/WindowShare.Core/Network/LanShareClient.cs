@@ -46,6 +46,15 @@ public sealed class LanShareClient : IDisposable
     public string HostInfo { get; private set; } = "";
     public bool IsEncrypted { get; private set; }
 
+    /// <summary>
+    /// 本端是否支持 HEVC 解码（连接前由 UI 设置；来自子进程探针的实测结论）。
+    /// 默认 false：未探测/不支持时按 H.264 观看端接入。
+    /// </summary>
+    public bool HevcSupported { get; set; }
+
+    /// <summary>本次会话的视频编码（认证结果协商；旧版 Host 不带该字段 = H.264）</summary>
+    public VideoCodec NegotiatedCodec { get; private set; } = VideoCodec.H264;
+
     /// <summary>本次会话的系统声音参数（Host 未共享时为 Disabled）</summary>
     public AudioSessionInfo Audio { get; private set; } = AudioSessionInfo.Disabled;
 
@@ -129,6 +138,7 @@ public sealed class LanShareClient : IDisposable
                 IsEncrypted = result.Encrypted;
                 HostInfo = result.Info;
                 Audio = result.Audio ?? AudioSessionInfo.Disabled;
+                NegotiatedCodec = result.Codec;
                 backoffMs = 500; // 重置退避
 
                 // 认证成功 → 请求关键帧快速出画面
@@ -190,7 +200,7 @@ public sealed class LanShareClient : IDisposable
     }
 
     private sealed record AuthOutcome(bool Ok, string Reason, bool Encrypted, string Info,
-        AudioSessionInfo? Audio = null);
+        AudioSessionInfo? Audio = null, VideoCodec Codec = VideoCodec.H264);
 
     /// <summary>三步认证（同步帧 IO，在专用任务上执行）</summary>
     private AuthOutcome Authenticate(TcpFrameConnection conn)
@@ -203,6 +213,7 @@ public sealed class LanShareClient : IDisposable
                 DeviceId = DeviceId,
                 DeviceName = DeviceName,
                 AppVersion = typeof(LanShareClient).Assembly.GetName().Version?.ToString(3) ?? "",
+                HevcSupported = HevcSupported,
             });
             conn.Send(MessageType.AuthRequest, FrameFlags.None, req);
 
@@ -265,7 +276,8 @@ public sealed class LanShareClient : IDisposable
             if (audio.Enabled)
                 Logging.Logger.Info("LanClient",
                     $"Host 正在共享系统声音: {audio.SampleRate}Hz/{audio.Channels}ch {audio.Codec}");
-            return new AuthOutcome(true, "", result.EncryptionEnabled, info, audio);
+            return new AuthOutcome(true, "", result.EncryptionEnabled, info, audio,
+                VideoCodecs.FromWireName(result.VideoCodecWireName));
         }
         catch (Exception ex)
         {
