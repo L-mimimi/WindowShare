@@ -314,18 +314,18 @@ public sealed class LanShareServer : ShareSession.IFrameSink, ShareSession.IAudi
             var senderTask = Task.Run(() =>
             {
                 try { SendLoopAsync(clientSession, ct); }
-                catch (Exception ex) { Logging.Logger.Warn("LanServer", $"发送任务异常退出: {ex.GetType().Name}: {ex.Message}"); }
+                catch (Exception ex) { LogTaskExit("发送", ex); }
             }, ct);
             // 音频独立发送循环（与视频队列互不阻塞）
             var audioSenderTask = Task.Run(() =>
             {
                 try { AudioSendLoopAsync(clientSession, ct); }
-                catch (Exception ex) { Logging.Logger.Warn("LanServer", $"音频发送任务异常退出: {ex.GetType().Name}: {ex.Message}"); }
+                catch (Exception ex) { LogTaskExit("音频发送", ex); }
             }, ct);
             var receiveTask = Task.Run(() =>
             {
                 try { ReceiveLoopAsync(clientSession, ct); }
-                catch (Exception ex) { Logging.Logger.Warn("LanServer", $"接收任务异常退出: {ex.GetType().Name}: {ex.Message}"); }
+                catch (Exception ex) { LogTaskExit("接收", ex); }
             }, ct);
             await Task.WhenAny(senderTask, audioSenderTask, receiveTask);
         }
@@ -475,6 +475,8 @@ public sealed class LanShareServer : ShareSession.IFrameSink, ShareSession.IAudi
                 EncoderName = _session.EncoderName,
                 Width = _session.Source?.Bounds.Width ?? 0,
                 Height = _session.Source?.Bounds.Height ?? 0,
+                TargetBitrateBps = _session.Options?.BitrateBps ?? 0,
+                Fps = _session.Options?.Fps ?? 0,
                 AudioEnabled = audioInfo.Enabled,
                 AudioSampleRate = audioInfo.SampleRate,
                 AudioChannels = audioInfo.Channels,
@@ -578,6 +580,9 @@ public sealed class LanShareServer : ShareSession.IFrameSink, ShareSession.IAudi
                         EncoderName = _session.EncoderName,
                         Hardware = _session.IsHardwareEncoder,
                         SourceTitle = _session.Source?.Title ?? "",
+                        TargetBitrateBps = _controller.CurrentBitrateBps,
+                        Fps = _session.Options?.Fps ?? 0,
+                        Downgraded = _controller.IsDowngraded,
                     });
                     client.Connection.Send(MessageType.StatsInfo, FrameFlags.None, stats);
                 }
@@ -588,6 +593,15 @@ public sealed class LanShareServer : ShareSession.IFrameSink, ShareSession.IAudi
                 }
             }
         }
+    }
+
+    /// <summary>收发任务退出：随会话停止的取消是正常路径（Debug），真正的异常才 Warn</summary>
+    private static void LogTaskExit(string role, Exception ex)
+    {
+        if (ex is OperationCanceledException)
+            Logging.Logger.Debug("LanServer", $"{role}任务随会话停止而结束");
+        else
+            Logging.Logger.Warn("LanServer", $"{role}任务异常退出: {ex.GetType().Name}: {ex.Message}");
     }
 
     public int GetViewerCount()

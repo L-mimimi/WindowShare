@@ -36,6 +36,9 @@ public partial class MainWindow : Window
     private WriteableBitmap? _previewBitmap;
     private readonly DispatcherTimer _infoTimer;
     private readonly HostSettings _settings = HostSettings.Load();
+    /// <summary>状态栏统计（观看者数 + 会话每秒快照，UpdateStatsLine 组合显示）</summary>
+    private int _viewerCount;
+    private SessionStatsSnapshot _lastStats;
     /// <summary>信令房间是否已注册成功（与「是否勾选」区分：勾选但未连上时显示重试入口）</summary>
     private bool _signalingReady;
     /// <summary>房间号被占用时的换号重试次数</summary>
@@ -238,9 +241,31 @@ public partial class MainWindow : Window
         }
         var (width, height) = session.OutputSize;
         TxtOutput.Text = width > 0
-            ? $"输出 {width}×{height}@{session.Options?.Fps ?? 0}fps"
+            ? $"输出 {width}×{height}@{session.Options?.Fps ?? 0}fps{CaptureHint(session)}"
             : "";
         TxtAudio.Text = DescribeAudio(session);
+    }
+
+    /// <summary>
+    /// 帧率错配提示：配置档位高但内容更新率低时（如 144fps 档只捕到 56fps），
+    /// 在输出信息里如实显示，避免「选了高帧率却没变流畅」的困惑。
+    /// </summary>
+    private static string CaptureHint(ShareSession session)
+    {
+        var target = session.Options?.Fps ?? 0;
+        var capture = session.CaptureStats.Fps; // OnStatsTick 每秒刷新
+        return target > 0 && capture > 0.5 && capture < target * 0.7
+            ? $"（实际捕获 {capture:F0}fps）"
+            : "";
+    }
+
+    /// <summary>组合显示观看者数与实时输出码率/帧率（ViewerCountChanged 与 StatsTick 驱动）</summary>
+    private void UpdateStatsLine()
+    {
+        TxtStats.Text = $"观看者：{_viewerCount}" +
+                        (_lastStats.SendBitrateBps > 0
+                            ? $" · {_lastStats.SendBitrateBps / 1e6:F1} Mbps · {_lastStats.SendFps:F0}fps"
+                            : "");
     }
 
     /// <summary>系统声音共享状态（含实时电平，一眼看出「有没有声音在传」）</summary>
@@ -350,6 +375,11 @@ public partial class MainWindow : Window
         _session.PreviewArrived += OnPreviewArrived;
         _session.Stopped += OnSessionStopped;
         _session.Error += OnSessionError;
+        _session.StatsTick += s => Dispatcher.BeginInvoke(() =>
+        {
+            _lastStats = s;
+            UpdateStatsLine();
+        });
 
         // LAN 共享服务器：观看者经密码+白名单审批接入
         _whitelist = new DeviceWhitelist();
@@ -357,7 +387,10 @@ public partial class MainWindow : Window
             _settings.BindAddress);
         _server.ApproveRequired = info => System.Threading.Tasks.Task.FromResult(Dispatcher.Invoke(() => ApproveDevice(info)));
         _server.ViewerCountChanged += count => Dispatcher.BeginInvoke(() =>
-            TxtStats.Text = $"观看者：{count}");
+        {
+            _viewerCount = count;
+            UpdateStatsLine();
+        });
 
         try
         {
@@ -394,7 +427,7 @@ public partial class MainWindow : Window
         _tray?.Update("窗享 Host — 共享中", sharing: true);
 
         // 悬浮共享指示条 + 窗口红框（隐私提示）
-        _overlay = new OverlayWindow(source, _session);
+        _overlay = new OverlayWindow(source, _session, () => _server?.GetViewerCount() ?? 0);
         _overlay.Show();
         if (source.Kind == CaptureSourceKind.Window)
         {
@@ -634,7 +667,10 @@ public partial class MainWindow : Window
 
     private void MarkLocalSignalingRunning(System.Diagnostics.Process? proc)
     {
-        _localSignaling = proc;
+        // 双击/重入时可能走到两次：只记一次「已就绪」日志；已跟踪的进程不被
+        // 「检测到已有实例」路径（proc=null）清掉句柄，否则窗口关闭时无法回收它。
+        var alreadyTracked = _localSignaling != null;
+        _localSignaling ??= proc;
         if (proc != null)
         {
             proc.EnableRaisingEvents = true;
@@ -650,7 +686,8 @@ public partial class MainWindow : Window
         TxtSignalingUrl.Text = "http://localhost:5000";
         if (ChkSignaling.IsChecked != true)
             ChkSignaling.IsChecked = true;   // 触发既有流程：共享中立即连接，否则提示开始共享后连接
-        Logger.Info("Host", "本机信令服务器已就绪（http://localhost:5000）");
+        if (!alreadyTracked)
+            Logger.Info("Host", "本机信令服务器已就绪（http://localhost:5000）");
     }
 
     private void StopLocalSignaling(string reason)
@@ -864,7 +901,9 @@ public partial class MainWindow : Window
             TxtRoomCode.Text = "";
             TxtPassword.Text = "";
             TxtEncoder.Text = "编码器：未启动";
-            TxtStats.Text = "观看者：0";
+            _viewerCount = 0;
+            _lastStats = default;
+            UpdateStatsLine();
             TxtOutput.Text = "";
             TxtAudio.Text = "";
             ChkAudio.IsEnabled = true;

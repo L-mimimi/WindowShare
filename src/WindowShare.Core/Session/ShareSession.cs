@@ -43,6 +43,12 @@ public sealed record AudioSessionInfo(
     public static AudioSessionInfo Disabled { get; } = new(false, 0, 0, "", "");
 }
 
+/// <summary>每秒统计快照（悬浮条/状态区显示与日志诊断用）</summary>
+public readonly record struct SessionStatsSnapshot(
+    double SendBitrateBps,
+    double SendFps,
+    double CaptureFps);
+
 /// <summary>
 /// 共享会话编排器（Host 核心）：
 ///   捕获引擎 → 编码管线 → 分发到所有 <see cref="IFrameSink"/>（LAN 服务器 / WebRTC 发送端 / 文件写入）。
@@ -88,6 +94,9 @@ public sealed class ShareSession : IDisposable
     private int _previewBufferIndex;
     private long _lastPreviewQpc;
     private long _startTicks;
+    private System.Threading.Timer? _statsTimer;
+    private int _targetFps;
+    private volatile bool _captureFpsWarned;
     /// <summary>预览节流间隔（约 30fps）</summary>
     private readonly long _previewIntervalQpc =
         System.Diagnostics.Stopwatch.Frequency * 33 / 1000;
@@ -149,6 +158,15 @@ public sealed class ShareSession : IDisposable
     /// <summary>发生错误</summary>
     public event Action<string>? Error;
 
+    /// <summary>每秒统计快照（发送码率/帧率、捕获帧率；悬浮条与状态区显示用）</summary>
+    public event Action<SessionStatsSnapshot>? StatsTick;
+
+    /// <summary>发送统计（编码输出，悬浮条显示"实际码率/fps"）</summary>
+    public Core.Stats.StatsCollector SendStats { get; } = new();
+
+    /// <summary>捕获统计（引擎实际输出帧率，节流前；诊断帧率错配用）</summary>
+    public Core.Stats.StatsCollector CaptureStats { get; } = new();
+
     /// <summary>注册编码帧接收端</summary>
     public void AddSink(IFrameSink sink)
     {
@@ -209,11 +227,14 @@ public sealed class ShareSession : IDisposable
             }
 
             pipeline.Encoded += DispatchToSinks;
+            pipeline.Encoded += f => SendStats.OnFrame(f.PayloadSize);
 
             _engine = engine;
             _pipeline = pipeline;
             Source = source;
             Options = options;
+            _targetFps = fps;
+            _captureFpsWarned = false;
 
             engine.StoppedBySystem += reason =>
             {
@@ -230,6 +251,7 @@ public sealed class ShareSession : IDisposable
             _startTicks = DateTime.UtcNow.Ticks;
             engine.Start(source);
             IsSharing = true;
+            _statsTimer = new Timer(_ => OnStatsTick(), null, 1000, 1000);
             Logger.Info("Session",
                 $"共享已开始: 房间号={RoomCode}, {encWidth}x{encHeight}@{fps}fps {options.BitrateBps / 1000}kbps, " +
                 $"编码器={EncoderName}, 硬件={IsHardwareEncoder}, 零拷贝={IsZeroCopy}" +
@@ -310,6 +332,8 @@ public sealed class ShareSession : IDisposable
         }
 
         if (engine != null) engine.FrameArrived -= OnFrameArrived;
+        _statsTimer?.Dispose();
+        _statsTimer = null;
         try { engine?.Stop(); } catch (Exception ex) { Logger.Warn("Session", $"停止捕获异常: {ex.Message}"); }
         // 音频先停并冲刷：尾部几帧要在通知 sink 断开之前发出去，观看端才不会被截断
         if (audio != null)
@@ -341,6 +365,30 @@ public sealed class ShareSession : IDisposable
         var elapsed = TimeSpan.FromTicks(DateTime.UtcNow.Ticks - _startTicks);
         Logger.Info("Session", $"共享已停止 ({reason}), 持续 {elapsed:hh\\:mm\\:ss}");
         Stopped?.Invoke(reason);
+    }
+
+    /// <summary>每秒统计：重算发送/捕获速率，推送快照；帧率错配时告警一次</summary>
+    private void OnStatsTick()
+    {
+        try
+        {
+            var send = SendStats.Tick();
+            var capture = CaptureStats.Tick();
+            StatsTick?.Invoke(new SessionStatsSnapshot(send.BitrateBps, send.Fps, capture.Fps));
+
+            // 帧率错配诊断（只提示一次）：捕获率显著低于配置档（如 144fps 档但内容更新率
+            // 只有 ~56fps），档位不影响流畅度、只会摊薄每帧码率预算，提示用户可调低。
+            if (!_captureFpsWarned && _startTicks != 0 &&
+                DateTime.UtcNow.Ticks - _startTicks > TimeSpan.TicksPerSecond * 5 &&
+                capture.Fps > 0.5 && capture.Fps < _targetFps * 0.7)
+            {
+                _captureFpsWarned = true;
+                Logger.Warn("Session",
+                    $"实际捕获帧率 {capture.Fps:F0}fps 低于配置档 {_targetFps}fps" +
+                    "（由内容更新率与采集引擎决定）。过高档位不提升流畅度，只会摊薄每帧码率预算，可适当调低。");
+            }
+        }
+        catch { /* 统计失败不影响共享 */ }
     }
 
     /// <summary>释放资源（等效于停止共享）</summary>
@@ -398,6 +446,7 @@ public sealed class ShareSession : IDisposable
     /// <summary>捕获帧处理：先做低频预览拷贝，再提交编码（Submit 会接管并释放帧）</summary>
     private void OnFrameArrived(CaptureFrame frame)
     {
+        CaptureStats.OnFrame(0);
         var qpc = System.Diagnostics.Stopwatch.GetTimestamp();
         if (qpc - _lastPreviewQpc > _previewIntervalQpc)
         {

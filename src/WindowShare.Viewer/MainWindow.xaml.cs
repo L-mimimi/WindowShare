@@ -31,6 +31,9 @@ public partial class MainWindow : Window
     private WriteableBitmap? _bitmap;
     private double _lastRttMs = double.NaN;
     private volatile bool _firstKeyframeSeen;
+    /// <summary>Host 侧画质参数（StatsInfo 周期携带；0=未知，如旧版 Host 或 WebRTC 路径）</summary>
+    private int _hostTargetBitrateBps;
+    private bool _hostDowngraded;
     /// <summary>系统声音播放管线（解码 + 抖动缓冲 + 渲染 + 音画同步主时钟）</summary>
     private AudioPlaybackPipeline? _audio;
     /// <summary>待上屏的解码帧队列（音画同步需要「等到点再上屏」，不能在解码回调里直接画）</summary>
@@ -433,7 +436,11 @@ public partial class MainWindow : Window
         client.AudioFrameReceived += OnAudioFrameReceived;
         client.RttUpdated += rtt => _lastRttMs = rtt;
         client.StatsUpdated += s => Dispatcher.BeginInvoke(() =>
-            TxtEncoder.Text = $"编码器：{s.EncoderName}{(s.Hardware ? "(硬)" : "(软)")} · 源:{s.SourceTitle}");
+        {
+            TxtEncoder.Text = $"编码器：{s.EncoderName}{(s.Hardware ? "(硬)" : "(软)")} · 源:{s.SourceTitle}";
+            _hostTargetBitrateBps = s.TargetBitrateBps;
+            _hostDowngraded = s.Downgraded;
+        });
     }
 
     private void BtnDisconnect_Click(object sender, RoutedEventArgs e)
@@ -471,6 +478,8 @@ public partial class MainWindow : Window
         TxtEncrypt.Text = "加密：-";
         TxtTransport.Text = "传输：-";
         TxtEncoder.Text = "编码器：-";
+        _hostTargetBitrateBps = 0;
+        _hostDowngraded = false;
     }
 
     // ===== 数据流 =====
@@ -534,11 +543,23 @@ public partial class MainWindow : Window
     private void UpdateStatsBar()
     {
         var (bitrate, fps, _) = _stats.Tick();
-        TxtBitrate.Text = $"码率：{bitrate / 1000:F0} kbps";
+        // 有 Host 目标码率时显示「实测/目标」+ 差距提示：
+        // 降档说明是网络不够；未降档却远低于目标说明编码器没花预算（画面糊的来源）。
+        TxtBitrate.Text = _hostTargetBitrateBps > 0
+            ? $"码率：{bitrate / 1000:F0} / {_hostTargetBitrateBps / 1000:F0} kbps{GapHint(bitrate)}"
+            : $"码率：{bitrate / 1000:F0} kbps";
         TxtFps.Text = $"帧率：{fps:F1} fps";
         if (!double.IsNaN(_lastRttMs))
             TxtLatency.Text = $"延迟：≈{_lastRttMs / 2:F0} ms（网络单向）";
         RefreshAudioStatus();
+    }
+
+    /// <summary>实测码率与目标码率的差距提示（未降档却远低于目标 = 编码器欠产出）</summary>
+    private string GapHint(double measuredBps)
+    {
+        if (_hostDowngraded) return "（网络降档）";
+        if (measuredBps < _hostTargetBitrateBps * 0.7) return "（编码器欠产出）";
+        return "";
     }
 
     /// <summary>切换连接模式：只启用当前模式的输入区，避免往不生效的框里输入</summary>

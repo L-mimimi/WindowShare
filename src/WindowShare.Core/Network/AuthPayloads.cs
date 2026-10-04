@@ -54,6 +54,12 @@ public sealed record AuthResultPayload
     [JsonPropertyName("width")] public int Width { get; init; }
     [JsonPropertyName("height")] public int Height { get; init; }
 
+    // ===== 画质透明化（1.3.3 起；老版本 Host 不带这些字段，Viewer 按「未知」显示）=====
+    /// <summary>本次会话的目标码率（bit/s；拥塞降档后以 StatsInfo 的实时值为准）</summary>
+    [JsonPropertyName("bitrate")] public int TargetBitrateBps { get; init; }
+    /// <summary>配置帧率</summary>
+    [JsonPropertyName("fps")] public int Fps { get; init; }
+
     // ===== 系统声音（1.2.0 起；老版本 Host 不带这些字段，Viewer 按「无音频」处理）=====
     /// <summary>本次会话是否共享系统声音</summary>
     [JsonPropertyName("audio")] public bool AudioEnabled { get; init; }
@@ -75,6 +81,14 @@ public sealed record StatsInfoPayload
     [JsonPropertyName("source")] public string SourceTitle { get; init; } = "";
     /// <summary>Viewer → Host：最近 RTT（毫秒），用于拥塞控制（0=未知）</summary>
     [JsonPropertyName("rttMs")] public double RttMs { get; init; } = 0;
+
+    // ===== 画质透明化（1.3.3 起；老版本 Host 不带这些字段，Viewer 按「未知」显示）=====
+    /// <summary>Host 当前目标码率（bit/s，含拥塞降档后的实时值；0=未知/老版本）</summary>
+    [JsonPropertyName("bitrate")] public int TargetBitrateBps { get; init; }
+    /// <summary>配置帧率（0=未知/老版本）</summary>
+    [JsonPropertyName("fps")] public int Fps { get; init; }
+    /// <summary>Host 是否处于拥塞降档状态（true 时状态栏提示「已降档」）</summary>
+    [JsonPropertyName("dg")] public bool Downgraded { get; init; }
 }
 
 /// <summary>认证载荷的 JSON 序列化辅助</summary>

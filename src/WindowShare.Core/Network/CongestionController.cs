@@ -76,6 +76,18 @@ public sealed class CongestionController
         }
     }
 
+    /// <summary>当前生效的目标码率（bit/s；初始值 × 当前档位百分比，供状态栏显示）</summary>
+    public int CurrentBitrateBps
+    {
+        get { lock (_gate) return _initialBitrateBps * BitrateSteps[_bitrateStep] / 100; }
+    }
+
+    /// <summary>是否处于降档状态（码率或分辨率任一低于初始档）</summary>
+    public bool IsDowngraded
+    {
+        get { lock (_gate) return _bitrateStep > 0 || _resolutionStep > 0; }
+    }
+
     /// <summary>周期评估（每 2 秒调用一次）</summary>
     public ControlDecision Evaluate()
     {
