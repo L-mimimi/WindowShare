@@ -22,6 +22,13 @@ d36d7f2d3d0e18aa3c4fe7a48f079e136cd98e22f6bac0a995c198c00ae22ce2  WindowShare-Se
 2aa8e91b898a5ec3ded5189411abc31133e25b5cadf270f00a0846b2a1713f9f  WindowShare-Portable-1.4.1.zip
 ```
 
+## 1.4.1 更新
+
+- **修复 HEVC 会话拒接时 Viewer 的线程崩溃**：Host 发出的 WebRTC 拒接消息在 Viewer 的信令线程上直接改 UI（InvalidOperationException「调用线程无法访问此对象」），已改为 Dispatcher 调度；offer 分支同样的隐患一并修复。
+- **拒接原因不再丢失**：Host 拒绝接入时以 AuthResult 出现在认证质询位置，旧版 Viewer 会误报「Host 未响应认证质询」——现在会解析并展示真实原因（如「Host 正在以 HEVC 编码共享，观看端不支持…」）。
+- **房间号模式的确定性失败不再空转**：本机不支持 HEVC 解码时，直连被拒后直接展示原因，不再继续尝试注定失败的 WebRTC 回退。
+- 冒烟测试新增 Part4b（HEVC 会话协商：负例拒接原因完整性 + 解码可用时的正例接入），10 项全 PASS。
+
 ## 1.4.0 更新
 
 - **HEVC 编码支持（可选增强，默认关闭）**：Host 界面新增「HEVC 优先」开关——勾选且本机有可用 HEVC 编码器时以 HEVC 开启会话，**同画质约省 30–50% 码率**（网络受限场景更清晰）；探针失败自动回退 H.264，不影响共享。
