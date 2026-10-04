@@ -96,6 +96,8 @@ public sealed class MfH264Encoder : IDisposable
     private readonly SemaphoreSlim _inputSlots = new(0); // NeedInput 事件计数
     private volatile bool _disposed;
     private volatile bool _pumpRunning;
+    /// <summary>速率控制族的 CodecAPI 是否至少有一项下发成功（决定是否需要流启动后重试）</summary>
+    private volatile bool _rateControlApplied;
 
     /// <summary>创建编码器；device 非 null 时优先启用 D3D 零拷贝输入</summary>
     public MfH264Encoder(EncoderSettings settings, ID3D11Device? device = null, bool hardwarePreferred = true)
@@ -217,6 +219,11 @@ public sealed class MfH264Encoder : IDisposable
         // 启动流消息
         _transform.ProcessMessage(TMessageType.MessageNotifyBeginStreaming, UIntPtr.Zero);
         _transform.ProcessMessage(TMessageType.MessageNotifyStartOfStream, UIntPtr.Zero);
+
+        // 下发时机矩阵：部分编码器（实测 DX12）在流启动前对 CodecAPI 一律拒绝 → 流启动后再试
+        // 一轮；仍失败则该编码器的速率控制不可调，画质受其默认速率控制支配（记入诊断）。
+        if (!_rateControlApplied)
+            ApplyCodecApi("流启动后重试");
 
         // 异步 MFT：启动事件泵线程
         try
@@ -428,21 +435,64 @@ public sealed class MfH264Encoder : IDisposable
         return false;
     }
 
+    /// <summary>尽力而为地设置编码器属性（首次下发入口，诊断日志见 <see cref="ApplyCodecApi"/>）</summary>
+    private void ConfigureCodecApi() => ApplyCodecApi("类型配置后");
+
     /// <summary>
-    /// 尽力而为地设置编码器属性（CBR / 码率 / 低延迟 / GOP / 场景）。
+    /// 尽力而为地设置编码器属性（速率控制 / 低延迟 / GOP / 场景），并把每个 HRESULT 写进日志。
     /// 注意：并非所有编码器都实现 ICodecAPI —— 实测 Win11 的 "Microsoft AVC DX12 Encoder"
-    /// 对下列属性一律返回 E_NOTIMPL，GOP 与强制关键帧因此走编码器默认值（实测约每 30 帧一个 IDR）。
-    /// 码率的主控是输出媒体类型上的 MF_MT_AVG_BITRATE（该属性生效），这里失败只影响调优，不影响共享。
+    /// 在流启动前对下列属性一律返回 E_NOTIMPL（这是桌面内容欠产出、画质偏糊的根因：
+    /// 媒体类型上的 MF_MT_AVG_BITRATE 只是被接受，并不构成硬约束）。
+    /// 速率控制族按 CBR → 质量模式(3) 的顺序尝试到首个成功；质量模式会锁定码率
+    /// （运行中 SetBitrate 失效），拥塞降档只能靠分辨率阶梯，日志里会注明。
     /// </summary>
-    private void ConfigureCodecApi()
+    private void ApplyCodecApi(string phase)
     {
         var p = _transform.NativePointer;
-        CodecApi.TrySetUint32(p, CodecApi.AvEncCommonRateControlMode, 0); // CBR
-        CodecApi.TrySetUint32(p, CodecApi.AvEncCommonMeanBitRate, (uint)_settings.BitrateBps);
-        CodecApi.TrySetUint32(p, CodecApi.AvLowLatencyMode, 1);
+        var results = new List<string>(8);
+
+        // ===== 速率控制族（互斥：按优先级尝试到首个成功）=====
+        var rcHr = CodecApi.SetUint32(p, CodecApi.AvEncCommonRateControlMode, 0, out var rcDetail); // CBR
+        if (rcHr >= 0)
+        {
+            results.Add($"RateControlMode=CBR[{rcDetail}]");
+            var brHr = CodecApi.SetUint32(p, CodecApi.AvEncCommonMeanBitRate,
+                (uint)_settings.BitrateBps, out var brDetail);
+            results.Add($"MeanBitRate={(brHr >= 0 ? $"OK[{brDetail}]" : CodecApi.Hr(brHr))}");
+            _rateControlApplied = true;
+        }
+        else
+        {
+            var avHr = CodecApi.IsAvailable(p, CodecApi.AvEncCommonRateControlMode);
+            results.Add($"RateControlMode=CBR:{CodecApi.Hr(rcHr)}(IsAvailable={CodecApi.Hr(avHr)})");
+            var qHr = CodecApi.SetUint32(p, CodecApi.AvEncCommonRateControlMode, 3, out _); // Quality
+            if (qHr >= 0)
+            {
+                var qvHr = CodecApi.SetUint32(p, CodecApi.AvEncCommonQuality, 95, out var qvDetail);
+                results.Add(qvHr >= 0
+                    ? $"RateControlMode=Quality95[{qvDetail}]（运行中改码率将失效，拥塞降档走分辨率）"
+                    : $"RateControlMode=Quality但Quality95={CodecApi.Hr(qvHr)}");
+                _rateControlApplied = true;
+            }
+            else
+            {
+                results.Add($"RateControlMode=Quality:{CodecApi.Hr(qHr)}");
+            }
+        }
+
+        // ===== 与速率控制无关的通用属性 =====
+        var llHr = CodecApi.SetUint32(p, CodecApi.AvLowLatencyMode, 1, out var llDetail);
+        results.Add($"LowLatency={(llHr >= 0 ? $"OK[{llDetail}]" : CodecApi.Hr(llHr))}");
         if (_settings.GopSize > 0)
-            CodecApi.TrySetUint32(p, CodecApi.AvEncMPVGopSize, (uint)_settings.GopSize);
-        CodecApi.TrySetUint32(p, CodecApi.AvScenarioInfo, 1); // DisplayRemoting
+        {
+            var gHr = CodecApi.SetUint32(p, CodecApi.AvEncMPVGopSize, (uint)_settings.GopSize, out var gDetail);
+            results.Add($"GOPSize={(gHr >= 0 ? $"OK[{gDetail}]" : CodecApi.Hr(gHr))}");
+        }
+        var scHr = CodecApi.SetUint32(p, CodecApi.AvScenarioInfo, 1, out var scDetail);
+        results.Add($"Scenario=DisplayRemoting[{(scHr >= 0 ? scDetail : CodecApi.Hr(scHr))}]");
+
+        Logging.Logger.Info("CodecAPI",
+            $"属性下发[{phase} / {EncoderName}]: {string.Join(", ", results)}");
     }
 
     // ===== 输入 API =====
