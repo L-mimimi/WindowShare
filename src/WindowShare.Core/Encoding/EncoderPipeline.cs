@@ -15,7 +15,7 @@ public sealed class EncoderPipeline : IDisposable
     private readonly ID3D11Device _device;
     private readonly GpuVideoProcessor _videoProcessor;
     // 输出尺寸变化时会整体重建（见 UpdateOutputSize），因此不是 readonly
-    private MfH264Encoder _encoder;
+    private MfVideoEncoder _encoder;
     private readonly object _gate = new();
 
     private int _outWidth;      // 当前编码输出宽
@@ -71,7 +71,7 @@ public sealed class EncoderPipeline : IDisposable
         _device = D3D11DevicePool.GetOrCreate();
         _videoProcessor = new GpuVideoProcessor(_device);
         // 传入共享设备：硬件编码器直接吃 GPU NV12 纹理（零拷贝）
-        _encoder = new MfH264Encoder(Settings, _device);
+        _encoder = new MfVideoEncoder(Settings, _device);
         _encoder.Encoded += OnEncoderOutput;
         Logger.Info("Pipeline",
             $"编码管线就绪: {_outWidth}x{_outHeight} @ {Settings.Fps}fps, " +
@@ -202,10 +202,10 @@ public sealed class EncoderPipeline : IDisposable
     {
         var settings = Settings with { Width = w, Height = h };
 
-        MfH264Encoder next;
+        MfVideoEncoder next;
         try
         {
-            next = new MfH264Encoder(settings, _device);
+            next = new MfVideoEncoder(settings, _device);
         }
         catch (Exception ex)
         {
@@ -227,7 +227,7 @@ public sealed class EncoderPipeline : IDisposable
             $"编码分辨率: → {w}x{h}（编码器已重建: {next.EncoderName}, " +
             $"硬件={next.IsHardware}, 零拷贝={next.IsD3DAccelerated}）");
 
-        // 旧编码器必须放到后台释放。MfH264Encoder.Dispose 会 Join 事件泵线程，
+        // 旧编码器必须放到后台释放。MfVideoEncoder.Dispose 会 Join 事件泵线程，
         // 而泵线程此刻可能正卡在 ShareSession._gate 上（分发帧给 sink）；本线程又持有
         // 管线 _gate，同步等待就会与 ShareSession.SetDynamicResolution
         // （先持 session._gate、再取 pipeline._gate）形成锁环 → 死锁。
@@ -338,7 +338,7 @@ public sealed class EncoderPipeline : IDisposable
 
     public void Dispose()
     {
-        MfH264Encoder encoder;
+        MfVideoEncoder encoder;
         lock (_gate) encoder = _encoder;
         encoder.Dispose();
         _videoProcessor.Dispose();

@@ -1,6 +1,7 @@
 using System.Runtime.InteropServices;
 using SharpGen.Runtime;
 using Vortice.MediaFoundation;
+using WindowShare.Core.Encoding;
 using WindowShare.Core.Logging;
 
 namespace WindowShare.Core.Decoding;
@@ -16,14 +17,19 @@ public sealed class DecodedVideoFrame
 }
 
 /// <summary>
-/// Media Foundation H.264 解码器（同步 MFT，系统自带 "Microsoft H264 Video Decoder MFT"）：
-///   - 输入：H.264 Annex-B 帧序列（一个访问单元一次调用）；
+/// Media Foundation 视频解码器（H.264 = 系统自带 "Microsoft H264 Video Decoder MFT"；
+/// HEVC = 商店扩展 "HEVCVideoExtension"，它只接受自报的媒体类型，不接受手工拼的类型）：
+///   - 输入：Annex-B 帧序列（一个访问单元一次调用）；
 ///   - 输出：NV12 → CPU 转 BGRA 回调（Viewer 显示用）；
-///   - 自动处理首帧 STREAM_CHANGE（SPS/PPS 解析出分辨率）。
+///   - 自动处理首帧 STREAM_CHANGE（参数集解析出分辨率）。
 /// </summary>
-public sealed class MfH264Decoder : IDisposable
+public sealed class MfVideoDecoder : IDisposable
 {
     private static readonly Guid TransformIid = new("bf94c121-5b05-4e6f-8000-ba598961414d");
+
+    /// <summary>MFVideoFormat_HEVC（FCC 'HEVC'；Vortice 未提供常量，与 mfapi.h 一致）</summary>
+    private static readonly Guid HevcVideoFormat =
+        new(0x43564548, 0x0000, 0x0010, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71);
 
     /// <summary>
     /// MF_LOW_LATENCY（与 CODECAPI_AVLowLatencyMode 同一 GUID），设在 MFT 自身的属性存储上。
@@ -72,7 +78,7 @@ public sealed class MfH264Decoder : IDisposable
     /// <summary>因输出缓冲长度不足而被丢弃的帧数（诊断用）</summary>
     public int DroppedShortBuffer => Volatile.Read(ref _droppedShortBuffer);
 
-    public MfH264Decoder()
+    public MfVideoDecoder(VideoCodec codec = VideoCodec.H264)
     {
         lock (MfGate)
         {
@@ -82,7 +88,49 @@ public sealed class MfH264Decoder : IDisposable
             }
         }
 
-        // 枚举 H.264 解码器（同步，系统自带）
+        _transform = codec == VideoCodec.Hevc ? CreateHevcDecoder() : CreateH264Decoder();
+
+        // 低延迟解码：MF_LOW_LATENCY 走 MFT 自身的属性存储。
+        // 不要用 ICodecAPI 设同名属性——系统 H.264 解码器上会把 CLR 打崩（0x80131506）。
+        var lowLatency = false;
+        try
+        {
+            var attrs = _transform.Attributes;
+            attrs?.Set(LowLatencyKey, 1u);
+            lowLatency = true;
+        }
+        catch (Exception ex)
+        {
+            Logging.Logger.Debug("Decoder", "低延迟属性设置失败: " + ex.Message);
+        }
+
+        // 输入类型：H.264 从已激活 MFT 的可用类型中挑选（解码器规范：先输入类型，后输出类型）。
+        // HEVC 在 CreateHevcDecoder 内用自报类型完成设置。
+        if (codec != VideoCodec.Hevc)
+        {
+            var inType = PickAvailableType(isInput: true, VideoFormatGuids.H264)
+                         ?? throw new InvalidOperationException("H.264 解码器未提供可用的输入媒体类型");
+            _transform.SetInputType(0, inType, 0);
+            inType.Dispose();
+        }
+
+        // 输出类型：故意不在这里设置。
+        // 投喂前解码器只能给出「默认 1920x1080」这类猜的分辨率；一旦按它设了输出类型，
+        // 解码器会先攒满 28 帧内部缓冲才报 STREAM_CHANGE，换类型时那 28 帧被直接丢弃
+        //（实测：观看者接入后约 1 秒黑屏，冒烟测试固定少解 28 帧）。
+        // 留空后首个 ProcessOutput 会返回 TYPE_NOT_SET / STREAM_CHANGE，此时按真实分辨率协商；
+        // 再配合上面的低延迟模式，实测投喂多少帧就解出多少帧（零丢帧）。
+        _outputTypeSet = false;
+
+        _transform.ProcessMessage(TMessageType.MessageNotifyBeginStreaming, UIntPtr.Zero);
+        _transform.ProcessMessage(TMessageType.MessageNotifyStartOfStream, UIntPtr.Zero);
+        Logging.Logger.Info("Decoder",
+            $"{codec.DisplayName()} 解码器已就绪（低延迟={(lowLatency ? "开" : "关")}）");
+    }
+
+    /// <summary>系统自带 H.264 解码器（类型过滤枚举 → 第一个候选；同步 MFT）</summary>
+    private static IMFTransform CreateH264Decoder()
+    {
         MediaFactory.MFTEnumEx(TransformCategoryGuids.VideoDecoder,
             0x01 | 0x10 | 0x40, // SYNCMFT | LOCALMFT | SORTANDFILTER
             new RegisterTypeInfo { GuidMajorType = MediaTypeGuids.Video, GuidSubtype = VideoFormatGuids.H264 },
@@ -99,39 +147,97 @@ public sealed class MfH264Decoder : IDisposable
         Marshal.FreeCoTaskMem(ptrs);
         activate.ActivateObject(out IMFTransform? transform).CheckError();
         activate.Dispose();
-        _transform = transform ?? throw new InvalidOperationException("H.264 解码器 MFT 激活返回空对象");
+        return transform ?? throw new InvalidOperationException("H.264 解码器 MFT 激活返回空对象");
+    }
 
-        // 低延迟解码：MF_LOW_LATENCY 走 MFT 自身的属性存储。
-        // 不要用 ICodecAPI 设同名属性——系统 H.264 解码器上会把 CLR 打崩（0x80131506）。
-        var lowLatency = false;
-        try
+    /// <summary>
+    /// HEVC 解码器（商店扩展 "HEVCVideoExtension"，异步 MFT）。
+    /// 注意：按 HEVC→NV12 的类型过滤枚举对它无效（返回空），必须全量枚举按名字挑选；
+    /// 且它只接受「自报的输入媒体类型」（手工拼的类型一律 MF_E_INVALIDMEDIATYPE），
+    /// 因此逐个候选用 GetInputAvailableType 里 subtype==HEVC 的类型对象直接回设。
+    /// </summary>
+    private IMFTransform CreateHevcDecoder()
+    {
+        MediaFactory.MFTEnumEx(TransformCategoryGuids.VideoDecoder,
+            0x01 | 0x08 | 0x10 | 0x40, // 含 ASYNCMFT：扩展解码器是异步 MFT
+            null, null,
+            out var ptrs, out var count);
+        var candidates = new List<IMFActivate>();
+        for (var i = 0; i < count; i++)
         {
-            var attrs = _transform.Attributes;
-            attrs?.Set(LowLatencyKey, 1u);
-            lowLatency = true;
+            var p = Marshal.ReadIntPtr(ptrs, i * IntPtr.Size);
+            var activate = new IMFActivate(p);
+            try
+            {
+                var name = activate.GetString(TransformAttributeKeys.MftFriendlyNameAttribute);
+                if (name.Contains("HEVC", StringComparison.OrdinalIgnoreCase) ||
+                    name.Contains("H265", StringComparison.OrdinalIgnoreCase))
+                    candidates.Add(activate);
+                else
+                    activate.Dispose();
+            }
+            catch
+            {
+                activate.Dispose();
+            }
         }
-        catch (Exception ex)
+        Marshal.FreeCoTaskMem(ptrs);
+        if (candidates.Count == 0)
+            throw new InvalidOperationException(
+                "未找到 HEVC 解码器（请在 Windows 设置 → 应用 → 可选功能 中安装「HEVC 视频扩展」后重试）");
+
+        Exception? lastError = null;
+        foreach (var activate in candidates)
         {
-            Logging.Logger.Debug("Decoder", "低延迟属性设置失败: " + ex.Message);
+            IMFTransform? transform = null;
+            try
+            {
+                activate.ActivateObject(out transform);
+                if (transform == null) continue;
+                try
+                {
+                    var attrs = transform.Attributes;
+                    attrs?.Set(TransformAttributeKeys.TransformAsyncUnlock, 1u);
+                }
+                catch { /* 同步 MFT 无此属性 */ }
+
+                // 从自报输入类型里挑 HEVC（含 SCC 变体 HEVS）
+                for (var j = 0; j < 16; j++)
+                {
+                    IMFMediaType? offered = null;
+                    try
+                    {
+                        offered = transform.GetInputAvailableType(0, j);
+                        var sub = offered.GetGUID(MediaTypeAttributeKeys.Subtype);
+                        if (sub != HevcVideoFormat) continue;
+                        transform.SetInputType(0, offered, 0);
+                        Logging.Logger.Info("Decoder", "HEVC 解码器已选定输入类型（扩展 MFT 自报类型）");
+                        var chosen = transform;
+                        transform = null; // 所有权转移：finally 不再释放
+                        return chosen;
+                    }
+                    catch (Exception ex)
+                    {
+                        lastError = ex;
+                    }
+                    finally
+                    {
+                        offered?.Dispose();
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                lastError = ex;
+            }
+            finally
+            {
+                try { transform?.Dispose(); } catch { }
+                activate.Dispose();
+            }
         }
-
-        // 输入类型：从 MFT 枚举的可用类型中挑选 H264（解码器规范：先输入类型，后输出类型）
-        var inType = PickAvailableType(isInput: true, VideoFormatGuids.H264)
-                     ?? throw new InvalidOperationException("H.264 解码器未提供可用的输入媒体类型");
-        _transform.SetInputType(0, inType, 0);
-        inType.Dispose();
-
-        // 输出类型：故意不在这里设置。
-        // 投喂前解码器只能给出「默认 1920x1080」这类猜的分辨率；一旦按它设了输出类型，
-        // 解码器会先攒满 28 帧内部缓冲才报 STREAM_CHANGE，换类型时那 28 帧被直接丢弃
-        //（实测：观看者接入后约 1 秒黑屏，冒烟测试固定少解 28 帧）。
-        // 留空后首个 ProcessOutput 会返回 TYPE_NOT_SET / STREAM_CHANGE，此时按真实分辨率协商；
-        // 再配合上面的低延迟模式，实测投喂多少帧就解出多少帧（零丢帧）。
-        _outputTypeSet = false;
-
-        _transform.ProcessMessage(TMessageType.MessageNotifyBeginStreaming, UIntPtr.Zero);
-        _transform.ProcessMessage(TMessageType.MessageNotifyStartOfStream, UIntPtr.Zero);
-        Logging.Logger.Info("Decoder", $"H.264 解码器已就绪（低延迟={(lowLatency ? "开" : "关")}）");
+        throw new InvalidOperationException(
+            $"HEVC 解码器候选均无法配置 HEVC 输入类型: {lastError?.Message}");
     }
 
     /// <summary>
@@ -182,7 +288,7 @@ public sealed class MfH264Decoder : IDisposable
     /// <summary>送入一帧 Annex-B 码流并抽干所有可用输出</summary>
     public void Decode(byte[] annexB, long timestampUtc)
     {
-        if (_disposed) throw new ObjectDisposedException(nameof(MfH264Decoder));
+        if (_disposed) throw new ObjectDisposedException(nameof(MfVideoDecoder));
 
         lock (_gate)
         {

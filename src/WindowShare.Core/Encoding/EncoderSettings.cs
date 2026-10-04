@@ -5,6 +5,9 @@ namespace WindowShare.Core.Encoding;
 /// <summary>编码器输出设置（动态码率/动态分辨率运行中可调）</summary>
 public sealed record EncoderSettings
 {
+    /// <summary>视频编码（决定编码器候选链与解码端选择；LAN 帧格式不变）</summary>
+    public VideoCodec Codec { get; init; } = VideoCodec.H264;
+
     /// <summary>编码输出宽（必须为偶数，NV12 要求）</summary>
     public required int Width { get; init; }
 

@@ -23,7 +23,7 @@ public enum ConnectionState
 /// <summary>
 /// LAN 观看客户端（Viewer 端）：
 ///   - 连接 + 三步认证（设备 ID/密码，支持 ECDH+AES-GCM 会话加密）；
-///   - 接收 H.264 帧并回调（配合 MfH264Decoder 解码显示）；
+///   - 接收 H.264 帧并回调（配合 MfVideoDecoder 解码显示）；
 ///   - Ping/Pong RTT 统计、断线自动重连（指数退避 + 重连后请求关键帧）；
 ///   - 显示连接状态/码率/帧率/延迟所需的全部数据源。
 /// </summary>

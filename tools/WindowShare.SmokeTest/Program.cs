@@ -74,7 +74,7 @@ public static class Program
         foreach (var w in windows.Take(5)) Logger.Info("Probe", $"  {w}");
 
         Logger.Info("Probe", "---- 编码器清单 ----");
-        foreach (var name in MfH264Encoder.ProbeEncoders())
+        foreach (var name in MfVideoEncoder.ProbeEncoders())
             Logger.Info("Probe", $"  {name}");
 
         Logger.Info("Probe", "---- 分辨率/帧率档位支持探测 ----");
@@ -106,7 +106,7 @@ public static class Program
             var level = VideoFormatPlanner.SuggestH264Level(w, h, fps);
             try
             {
-                using var encoder = new MfH264Encoder(settings, probeDevice);
+                using var encoder = new MfVideoEncoder(settings, probeDevice);
                 Logger.Info("Probe",
                     $"  {w}x{h}@{fps} {kbps}kbps Level {VideoFormatPlanner.H264LevelName(level)} [{note}]: 可用 " +
                     $"({encoder.EncoderName}, 硬件={encoder.IsHardware}, 零拷贝={encoder.IsD3DAccelerated}, " +
@@ -297,7 +297,7 @@ public static class Program
 
     /// <summary>
     /// 回环端到端测试：ShareSession（主显示器）+ LanShareServer → LanShareClient（回环）
-    /// → MfH264Decoder 解码出画面。验证认证/加密/传输/解码/统计全链路。
+    /// → MfVideoDecoder 解码出画面。验证认证/加密/传输/解码/统计全链路。
     /// </summary>
     private static bool Part4LoopbackE2E()
     {
@@ -341,7 +341,7 @@ public static class Program
     var rttMs = double.NaN;
     var state = (ConnectionState)(-1);
     var connectedEvent = new ManualResetEventSlim(false);
-    var decoder = new MfH264Decoder();
+    var decoder = new MfVideoDecoder();
     var stats = new StatsCollector();
 
     var client = new LanShareClient("127.0.0.1", testPort,
@@ -540,7 +540,7 @@ public static class Program
         var session = new ShareSession();
         var sender = new WebRtcHostSender(includeAudio: true);
         var receiver = new WebRtcViewerReceiver(includeAudio: true);
-        var decoder = new MfH264Decoder();
+        var decoder = new MfVideoDecoder();
         var aacDecoder = new MfAacDecoder(AudioStreamInfo.SampleRate);
 
         long received = 0, decoded = 0, audioReceived = 0, audioDecoded = 0;
@@ -743,7 +743,7 @@ public static class Program
         pipeline.Encoded += f => writer.Write(f);
 
         // 可选：把编出来的码流直接解回来，核对能否解码 + 分辨率是否一致
-        using var decoder = verifyDecode ? new MfH264Decoder() : null;
+        using var decoder = verifyDecode ? new MfVideoDecoder() : null;
         long decodedFrames = 0;
         var decodedWidth = 0;
         var decodedHeight = 0;

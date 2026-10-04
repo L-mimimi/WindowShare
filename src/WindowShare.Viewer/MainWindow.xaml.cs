@@ -25,7 +25,7 @@ public partial class MainWindow : Window
     private LanShareClient? _client;
     private ViewerSignalingClient? _signaling;
     private WebRtcViewerReceiver? _webRtcReceiver;
-    private MfH264Decoder? _decoder;
+    private MfVideoDecoder? _decoder;
     private readonly StatsCollector _stats = new();
     private readonly DispatcherTimer _uiTimer;
     private WriteableBitmap? _bitmap;
@@ -256,7 +256,7 @@ public partial class MainWindow : Window
         TeardownSession();
 
         _firstKeyframeSeen = false;
-        _decoder = new MfH264Decoder();
+        _decoder = new MfVideoDecoder();
         _decoder.Decoded += OnDecodedFrame;
         StartPresentThread();
 

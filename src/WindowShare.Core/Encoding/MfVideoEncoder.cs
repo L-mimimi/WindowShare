@@ -15,7 +15,7 @@ namespace WindowShare.Core.Encoding;
 ///   - 支持 D3D11 纹理零拷贝输入（MFT 为 D3D11Aware 且提供了共享设备）。
 /// 选择顺序：硬件 MFT → AVC DX12 → 软件同步 MFT（按本机实际可用性自动探测）。
 /// </summary>
-public sealed class MfH264Encoder : IDisposable
+public sealed class MfVideoEncoder : IDisposable
 {
     private static readonly Guid TransformIid = new("bf94c121-5b05-4e6f-8000-ba598961414d");
     private static readonly Guid Texture2dIid = new("6F15AAF2-D208-4E89-9AB4-489535D34F9C");
@@ -100,7 +100,7 @@ public sealed class MfH264Encoder : IDisposable
     private volatile bool _rateControlApplied;
 
     /// <summary>创建编码器；device 非 null 时优先启用 D3D 零拷贝输入</summary>
-    public MfH264Encoder(EncoderSettings settings, ID3D11Device? device = null, bool hardwarePreferred = true)
+    public MfVideoEncoder(EncoderSettings settings, ID3D11Device? device = null, bool hardwarePreferred = true)
     {
         _settings = settings;
         EnsureMfStartup();
@@ -112,7 +112,7 @@ public sealed class MfH264Encoder : IDisposable
         // 逐个候选尝试「激活 → 解锁异步 → 设置 D3D 管理器 → 配置媒体类型」：
         // 编码器可能枚举得到却拒绝目标分辨率/帧率（E_INVALIDARG），此时换下一个候选而不是直接失败。
         var failures = new List<string>();
-        var candidates = EnumCandidates(hardwarePreferred);
+        var candidates = EnumCandidates(settings.Codec, hardwarePreferred);
         IMFTransform? chosen = null;
         IMFDXGIDeviceManager? chosenManager = null;
         try
@@ -246,56 +246,114 @@ public sealed class MfH264Encoder : IDisposable
 
         Logging.Logger.Info("MF",
             $"编码器就绪: {EncoderName} (硬件={IsHardware}, 零拷贝={IsD3DAccelerated}, " +
-            $"模式={(IsAsyncMode ? "异步" : "同步")}, {settings.Width}x{settings.Height}@{settings.Fps}, " +
-            $"{settings.BitrateBps / 1000}kbps, Level {VideoFormatPlanner.H264LevelName(AppliedH264Level)})");
+            $"模式={(IsAsyncMode ? "异步" : "同步")}, {settings.Codec.DisplayName()} " +
+            $"{settings.Width}x{settings.Height}@{settings.Fps}, " +
+            $"{settings.BitrateBps / 1000}kbps" +
+            (AppliedH264Level > 0 ? $", Level {VideoFormatPlanner.H264LevelName(AppliedH264Level)}" : "") + ")");
+    }
+
+    /// <summary>
+    /// 探测指定编码当前平台是否有可用编码器（激活候选并试配媒体类型，成功即释放）。
+    /// Host 开始共享前用它决定会话编码（HEVC 不可用时回退 H.264），开销约几十毫秒。
+    /// </summary>
+    public static bool ProbeAvailable(EncoderSettings settings)
+    {
+        List<Candidate> candidates;
+        try { candidates = EnumCandidates(settings.Codec, settings.PreferHardware); }
+        catch (Exception ex)
+        {
+            Logging.Logger.Warn("MF", $"枚举 {settings.Codec.DisplayName()} 编码器失败: {ex.Message}");
+            return false;
+        }
+
+        try
+        {
+            foreach (var candidate in candidates)
+            {
+                IMFTransform? transform = null;
+                try
+                {
+                    candidate.Activate.ActivateObject(out transform);
+                    if (transform == null) continue;
+                    try
+                    {
+                        var attrs = transform.Attributes;
+                        attrs?.Set(TransformAttributeKeys.TransformAsyncUnlock, 1u);
+                    }
+                    catch { /* 同步 MFT 无此属性 */ }
+                    if (TryConfigureTypes(transform, settings, out _, out _))
+                    {
+                        Logging.Logger.Info("MF",
+                            $"探测到可用的 {settings.Codec.DisplayName()} 编码器: {candidate.Name}");
+                        return true;
+                    }
+                }
+                catch { /* 候选不可用，换下一个 */ }
+                finally
+                {
+                    try { transform?.Dispose(); } catch { }
+                }
+            }
+        }
+        finally
+        {
+            foreach (var candidate in candidates) candidate.Activate.Dispose();
+        }
+        return false;
     }
 
     // ===== 编码器选择 =====
 
     /// <summary>Win11 24H2+ 的 D3D12 视频编码器（新 GPU 上走硬件、零拷贝）</summary>
     private const string AvcDx12EncoderName = "Microsoft AVC DX12 Encoder";
+    private const string HevcDx12EncoderName = "Microsoft HEVC DX12 Encoder";
+
+    /// <summary>MFVideoFormat_HEVC（FCC 'HEVC'；Vortice 未提供常量，与 mfapi.h 一致）</summary>
+    private static readonly Guid HevcVideoFormat =
+        new(0x43564548, 0x0000, 0x0010, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71);
 
     private sealed record Candidate(IMFActivate Activate, string Name, bool IsHardware, bool RequiresD3DManager);
 
     /// <summary>
     /// 按优先级枚举候选编码器（只枚举不激活；调用方负责 Dispose 每个 IMFActivate）：
     ///   1) 经典硬件 MFT（NVENC / QSV / AMF 注册的 Media Foundation 硬件编码器）
-    ///   2) Microsoft AVC DX12 Encoder
-    ///   3) 系统软件同步 MFT
-    /// 名字看不出是 H.264 的（WMV / H263 / MPEG-2 / HEVC）排到最后兜底；同名只保留优先级最高的一份。
+    ///   2) Microsoft AVC/HEVC DX12 Encoder
+    ///   3) 系统软件同步 MFT（HEVC 时含商店扩展的 HEVCVideoExtensionEncoder）
+    /// 名字看不出是目标编码的（WMV / H263 / MPEG-2）排到最后兜底；同名只保留优先级最高的一份。
     /// </summary>
-    private static List<Candidate> EnumCandidates(bool hardwarePreferred)
+    private static List<Candidate> EnumCandidates(VideoCodec codec, bool hardwarePreferred)
     {
         var result = new List<Candidate>();
         var fallback = new List<Candidate>();
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var dx12Name = codec == VideoCodec.Hevc ? HevcDx12EncoderName : AvcDx12EncoderName;
 
         if (hardwarePreferred)
         {
             AddCandidates(result, fallback, seen,
-                EnumActivators(MftEnumFlagHardware | MftEnumFlagSortandfilter), true, true);
+                EnumActivators(MftEnumFlagHardware | MftEnumFlagSortandfilter), true, true, codec);
             if (result.Count == 0)
-                Logging.Logger.Info("MF", "无注册的硬件编码器 MFT，尝试 AVC DX12 编码器");
+                Logging.Logger.Info("MF", $"无注册的硬件编码器 MFT，尝试 {dx12Name}");
         }
 
         var dx12 = new List<IMFActivate>();
         foreach (var act in EnumActivators(MftEnumFlagAll))
         {
-            if (SafeName(act).Equals(AvcDx12EncoderName, StringComparison.OrdinalIgnoreCase)) dx12.Add(act);
+            if (SafeName(act).Equals(dx12Name, StringComparison.OrdinalIgnoreCase)) dx12.Add(act);
             else act.Dispose();
         }
-        AddCandidates(result, fallback, seen, dx12, true, true);
+        AddCandidates(result, fallback, seen, dx12, true, true, codec);
 
         AddCandidates(result, fallback, seen,
-            EnumActivators(MftEnumFlagSyncmft | MftEnumFlagLocalmft | MftEnumFlagSortandfilter), false, false);
+            EnumActivators(MftEnumFlagSyncmft | MftEnumFlagLocalmft | MftEnumFlagSortandfilter), false, false, codec);
 
         result.AddRange(fallback);
         return result;
     }
 
-    /// <summary>把一组激活对象按「名字是否像 H.264」分流进候选表或兜底表</summary>
+    /// <summary>把一组激活对象按「名字是否像目标编码」分流进候选表或兜底表</summary>
     private static void AddCandidates(List<Candidate> result, List<Candidate> fallback, HashSet<string> seen,
-        List<IMFActivate> activators, bool isHardware, bool requiresD3DManager)
+        List<IMFActivate> activators, bool isHardware, bool requiresD3DManager, VideoCodec codec)
     {
         foreach (var activate in activators)
         {
@@ -306,16 +364,22 @@ public sealed class MfH264Encoder : IDisposable
                 continue;
             }
             var candidate = new Candidate(activate, name, isHardware, requiresD3DManager);
-            if (LooksLikeH264(name)) result.Add(candidate);
+            if (LooksLikeCodec(name, codec)) result.Add(candidate);
             else fallback.Add(candidate);
         }
     }
 
-    /// <summary>名字是否像 H.264/AVC 编码器（各厂商命名不统一：H264 / H.264 / AVC）</summary>
-    private static bool LooksLikeH264(string name) =>
-        name.Contains("H264", StringComparison.OrdinalIgnoreCase) ||
-        name.Contains("H.264", StringComparison.OrdinalIgnoreCase) ||
-        name.Contains("AVC", StringComparison.OrdinalIgnoreCase);
+    /// <summary>名字是否像目标编码的编码器（各厂商命名不统一：H264 / H.264 / AVC；HEVC / H265 / H.265）</summary>
+    private static bool LooksLikeCodec(string name, VideoCodec codec)
+    {
+        if (codec == VideoCodec.Hevc)
+            return name.Contains("HEVC", StringComparison.OrdinalIgnoreCase) ||
+                   name.Contains("H265", StringComparison.OrdinalIgnoreCase) ||
+                   name.Contains("H.265", StringComparison.OrdinalIgnoreCase);
+        return name.Contains("H264", StringComparison.OrdinalIgnoreCase) ||
+               name.Contains("H.264", StringComparison.OrdinalIgnoreCase) ||
+               name.Contains("AVC", StringComparison.OrdinalIgnoreCase);
+    }
 
     private static string SafeName(IMFActivate activate)
     {
@@ -366,37 +430,44 @@ public sealed class MfH264Encoder : IDisposable
     /// 配置输出 → 输入媒体类型。
     /// H.264 Level 必须显式下发：Microsoft AVC DX12 Encoder 默认锁在 Level 5.0，
     /// 4K（32400 宏块/帧）或 1080p144（1175040 宏块/秒）会被直接拒绝（E_INVALIDARG）。
-    /// 依次尝试「带 level」「不带 level」，兼容不接受该属性的编码器。
-    /// Profile 优先尝试 High（CABAC 熵编码，同码率下明显更清晰），拒绝则退回编码器默认；
-    /// WebRTC SDP 里声明的 profile-level-id 仅作展示——两端都是本应用自家的解码器，不作强校验。
+    /// HEVC 不下发 Level（各实现取值体系不同，走编码器默认），Profile 优先尝试 Main。
+    /// 依次尝试「带 profile/level」「不带」，兼容不接受该属性的编码器。
     /// </summary>
     private static bool TryConfigureTypes(IMFTransform transform, EncoderSettings settings,
         out int appliedLevel, out string error)
     {
-        var level = VideoFormatPlanner.SuggestH264Level(settings.Width, settings.Height, settings.Fps);
+        var isHevc = settings.Codec == VideoCodec.Hevc;
+        var level = isHevc ? 0 : VideoFormatPlanner.SuggestH264Level(settings.Width, settings.Height, settings.Fps);
         appliedLevel = level;
         error = string.Empty;
 
         const uint eAVEncH264VProfile_High = 100;
+        const uint eAVEncH265VProfile_Main = 1;
+        var profileValue = isHevc ? eAVEncH265VProfile_Main : eAVEncH264VProfile_High;
+        var profileName = isHevc ? "Main" : "High";
+        // HEVC 的 Level 体系与 H.264 不同，不做尝试
+        var levelMatrix = isHevc ? new[] { false } : new[] { true, false };
+        var outputSubtype = isHevc ? HevcVideoFormat : VideoFormatGuids.H264;
+
         foreach (var useProfile in new[] { true, false })
-        foreach (var useLevel in new[] { true, false })
+        foreach (var useLevel in levelMatrix)
         {
             var outType = MediaFactory.MFCreateMediaType();
             try
             {
                 outType.Set(MediaTypeAttributeKeys.MajorType, MediaTypeGuids.Video);
-                outType.Set(MediaTypeAttributeKeys.Subtype, VideoFormatGuids.H264);
+                outType.Set(MediaTypeAttributeKeys.Subtype, outputSubtype);
                 outType.Set(MediaTypeAttributeKeys.FrameSize, Pack2(settings.Width, settings.Height));
                 outType.Set(MediaTypeAttributeKeys.FrameRate, Pack2(settings.Fps, 1));
                 outType.Set(MediaTypeAttributeKeys.InterlaceMode, 2u); // Progressive
                 outType.Set(MediaTypeAttributeKeys.AvgBitrate, (uint)settings.BitrateBps);
                 if (useLevel) outType.Set(MediaTypeAttributeKeys.Mpeg2Level, (uint)level);
-                if (useProfile) outType.Set(MediaTypeAttributeKeys.Mpeg2Profile, eAVEncH264VProfile_High);
+                if (useProfile) outType.Set(MediaTypeAttributeKeys.Mpeg2Profile, profileValue);
                 transform.SetOutputType(0, outType, 0);
             }
             catch (SharpGenException ex)
             {
-                error = $"SetOutputType(profile={(useProfile ? "High" : "默认")}, " +
+                error = $"SetOutputType(profile={(useProfile ? profileName : "默认")}, " +
                         $"level={(useLevel ? VideoFormatPlanner.H264LevelName(level) : "未设置")}) " +
                         $"0x{ex.HResult:X8}";
                 continue;
@@ -418,7 +489,8 @@ public sealed class MfH264Encoder : IDisposable
                 transform.SetInputType(0, inType, 0);
                 appliedLevel = useLevel ? level : 0;
                 if (useProfile)
-                    Logging.Logger.Info("MF", "H.264 编码启用 High Profile（CABAC，同码率下更清晰）");
+                    Logging.Logger.Info("MF",
+                        $"{settings.Codec.DisplayName()} 编码启用 {profileName} Profile");
                 return true;
             }
             catch (SharpGenException ex)
@@ -500,7 +572,7 @@ public sealed class MfH264Encoder : IDisposable
     /// <summary>编码一帧 NV12 GPU 纹理（零拷贝）</summary>
     public void EncodeNv12Texture(ID3D11Texture2D nv12Texture, long timestampUtc)
     {
-        if (_disposed) throw new ObjectDisposedException(nameof(MfH264Encoder));
+        if (_disposed) throw new ObjectDisposedException(nameof(MfVideoEncoder));
         if (!IsD3DAccelerated)
             throw new InvalidOperationException("未启用 D3D 路径，请使用 EncodeNv12Bytes");
 
@@ -511,7 +583,7 @@ public sealed class MfH264Encoder : IDisposable
     /// <summary>编码一帧 NV12 系统内存数据（stride=width）</summary>
     public void EncodeNv12Bytes(byte[] nv12, long timestampUtc)
     {
-        if (_disposed) throw new ObjectDisposedException(nameof(MfH264Encoder));
+        if (_disposed) throw new ObjectDisposedException(nameof(MfVideoEncoder));
 
         var sample = CreateMemorySample(nv12, timestampUtc);
         SubmitSample(sample);
@@ -714,7 +786,7 @@ public sealed class MfH264Encoder : IDisposable
             var frame = new EncodedVideoFrame
             {
                 Data = data,
-                Keyframe = AnnexB.IsKeyframe(data),
+                Keyframe = AnnexB.IsKeyframe(data, _settings.Codec),
                 TimestampUtc = outSample.SampleTime != 0 ? outSample.SampleTime : DateTime.UtcNow.Ticks,
                 Width = _settings.Width,
                 Height = _settings.Height,
