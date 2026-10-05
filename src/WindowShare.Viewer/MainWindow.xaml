@@ -65,6 +65,14 @@
                             Background="#1E88E5" Foreground="White" Click="BtnConnect_Click" IsDefault="True"/>
                     <Button DockPanel.Dock="Left" x:Name="BtnDisconnect" Content="断开" Width="80" Margin="8,0,0,0"
                             Click="BtnDisconnect_Click" IsEnabled="False"/>
+                    <TextBlock DockPanel.Dock="Left" Text="解码器：" VerticalAlignment="Center" Margin="16,0,0,0"/>
+                    <ComboBox DockPanel.Dock="Left" x:Name="CboDecoder" Width="170" Margin="4,0,0,0"
+                              VerticalAlignment="Center" SelectionChanged="CboDecoder_SelectionChanged"
+                              ToolTip="视频解码路径选择（对 H.264 与 HEVC 会话都生效）：&#10;• 自动（推荐）：优先系统解码（硬解），不可用时自动用 FFmpeg 软解；&#10;• Media Foundation：仅系统解码 MFT（硬解优先）。个别显卡的 HEVC 扩展解码器有缺陷（黑屏/无画面）时请改选 FFmpeg；&#10;• FFmpeg（软件）：纯软件解码，与系统组件状态无关、兼容性最好，CPU 占用略高。">
+                        <ComboBoxItem Content="自动（推荐）"/>
+                        <ComboBoxItem Content="Media Foundation"/>
+                        <ComboBoxItem Content="FFmpeg（软件）"/>
+                    </ComboBox>
                     <CheckBox DockPanel.Dock="Left" x:Name="ChkAudioPlay" Content="播放系统声音" IsChecked="True"
                               VerticalAlignment="Center" Margin="16,0,0,0"
                               Checked="ChkAudioPlay_Changed" Unchecked="ChkAudioPlay_Changed"

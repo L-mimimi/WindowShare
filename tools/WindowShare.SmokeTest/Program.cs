@@ -307,7 +307,7 @@ public static class Program
         IVideoDecoder? decoder = null;
         try
         {
-            decoder = VideoDecoderFactory.Create(VideoCodec.Hevc, hevcMfAvailable: decodeOk);
+            decoder = VideoDecoderFactory.Create(VideoCodec.Hevc, DecoderPreference.Auto, hevcMfAvailable: decodeOk);
         }
         catch (Exception ex)
         {
@@ -501,7 +501,7 @@ public static class Program
             {
                 var connectedEvent = new ManualResetEventSlim(false);
                 long decodedFrames = 0;
-                using var decoder = VideoDecoderFactory.Create(VideoCodec.Hevc, hevcMfAvailable: decodeOk);
+                using var decoder = VideoDecoderFactory.Create(VideoCodec.Hevc, DecoderPreference.Auto, hevcMfAvailable: decodeOk);
                 Logger.Info("Part4b", $"正例解码器: {decoder.BackendName}");
                 decoder.Decoded += _ => Interlocked.Increment(ref decodedFrames);
                 var okClient = new LanShareClient("127.0.0.1", testPort,

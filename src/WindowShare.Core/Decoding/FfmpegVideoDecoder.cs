@@ -82,19 +82,22 @@ public sealed unsafe class FfmpegVideoDecoder : IVideoDecoder
     /// </summary>
     public static string? UnavailableReason() => FfmpegInterop.ProbeAvailability();
 
-    /// <summary>创建 HEVC 软解器；任何失败（DLL 缺失/版本不符）返回 null 并记日志</summary>
-    public static FfmpegVideoDecoder? TryCreateHevc()
+    /// <summary>创建软解器；任何失败（DLL 缺失/版本不符）返回 null 并记日志</summary>
+    public static FfmpegVideoDecoder? TryCreate(VideoCodec codec)
     {
         try
         {
-            return new FfmpegVideoDecoder(VideoCodec.Hevc);
+            return new FfmpegVideoDecoder(codec);
         }
         catch (Exception ex)
         {
-            Logging.Logger.Warn("Decoder", "FFmpeg 软解兜底不可用: " + ex.Message);
+            Logging.Logger.Warn("Decoder", $"FFmpeg 软解兜底不可用（{codec.DisplayName()}）: " + ex.Message);
             return null;
         }
     }
+
+    /// <summary>创建 HEVC 软解器（<see cref="TryCreate"/> 的便捷形式）</summary>
+    public static FfmpegVideoDecoder? TryCreateHevc() => TryCreate(VideoCodec.Hevc);
 
     public void Decode(byte[] annexB, long timestampUtc)
     {

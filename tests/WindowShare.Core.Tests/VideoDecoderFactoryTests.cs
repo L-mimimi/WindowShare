@@ -10,7 +10,7 @@ public class VideoDecoderFactoryTests
     [Fact]
     public void CreateH264_AlwaysMf()
     {
-        using var d = VideoDecoderFactory.Create(VideoCodec.H264, hevcMfAvailable: false);
+        using var d = VideoDecoderFactory.Create(VideoCodec.H264, DecoderPreference.Auto, hevcMfAvailable: false);
         Assert.Equal(VideoCodec.H264, d.Codec);
         Assert.Equal("MF", d.BackendName);
     }
@@ -18,11 +18,11 @@ public class VideoDecoderFactoryTests
     [Fact]
     public void CreateHevc_MfProbeFailed_FallsBackToFfmpeg()
     {
-        // hevcMfAvailable=false 时跳过 MF 分支，必然走 FFmpeg（DLL 随测试输出分发）
+        // hevcMfAvailable=false 时 Auto 模式跳过 MF 分支，必然走 FFmpeg（DLL 随测试输出分发）
         // FFmpeg 兜底也不可用的平台（avcodec 缺失/版本不符）才允许抛 InvalidOperationException
         try
         {
-            using var d = VideoDecoderFactory.Create(VideoCodec.Hevc, hevcMfAvailable: false);
+            using var d = VideoDecoderFactory.Create(VideoCodec.Hevc, DecoderPreference.Auto, hevcMfAvailable: false);
             Assert.Equal(VideoCodec.Hevc, d.Codec);
             Assert.Equal("FFmpeg", d.BackendName);
         }
@@ -30,6 +30,36 @@ public class VideoDecoderFactoryTests
         {
             Assert.True(FfmpegVideoDecoder.UnavailableReason() != null,
                 "抛异常的前提是 FFmpeg 兜底确实不可用");
+        }
+    }
+
+    [Fact]
+    public void CreateHevc_ForcedFfmpeg_AlwaysFfmpeg()
+    {
+        // 用户显式选择 FFmpeg：即使 MF 探针可用也走软解（用户绕开有缺陷的扩展解码器）
+        try
+        {
+            using var d = VideoDecoderFactory.Create(VideoCodec.Hevc, DecoderPreference.Ffmpeg, hevcMfAvailable: true);
+            Assert.Equal("FFmpeg", d.BackendName);
+        }
+        catch (InvalidOperationException)
+        {
+            Assert.True(FfmpegVideoDecoder.UnavailableReason() != null);
+        }
+    }
+
+    [Fact]
+    public void CreateH264_ForcedFfmpeg_AlwaysFfmpeg()
+    {
+        // FFmpeg 也能解 H.264：显式选择时对两种编码都生效
+        try
+        {
+            using var d = VideoDecoderFactory.Create(VideoCodec.H264, DecoderPreference.Ffmpeg, hevcMfAvailable: false);
+            Assert.Equal("FFmpeg", d.BackendName);
+        }
+        catch (InvalidOperationException)
+        {
+            Assert.True(FfmpegVideoDecoder.UnavailableReason() != null);
         }
     }
 

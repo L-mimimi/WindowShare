@@ -3,6 +3,7 @@ using System.Windows;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
+using System.Windows.Controls;
 using WindowShare.Core.Audio;
 using WindowShare.Core.Decoding;
 using WindowShare.Core.Encoding;
@@ -43,6 +44,19 @@ public partial class MainWindow : Window
     private bool _ffmpegHevcOk;
     /// <summary>MF 解码器会话中已炸过（托管异常）→ 强制换 FFmpeg 兜底，一次会话只换一次</summary>
     private bool _mfDecoderBroken;
+    /// <summary>解码器创建失败过 → 本会话不再反复尝试（避免每帧异常刷屏），状态栏已说明</summary>
+    private bool _decoderCreateFailed;
+    /// <summary>当前连接是否处于 Connected（看门狗提示用）</summary>
+    private bool _isConnected;
+    private DateTime? _connectedAtUtc;
+
+    /// <summary>用户选择的解码路径（设置持久化）</summary>
+    private DecoderPreference Preference => _settings.DecoderPreference switch
+    {
+        "mf" => DecoderPreference.MediaFoundation,
+        "ffmpeg" => DecoderPreference.Ffmpeg,
+        _ => DecoderPreference.Auto,
+    };
     /// <summary>系统声音播放管线（解码 + 抖动缓冲 + 渲染 + 音画同步主时钟）</summary>
     private AudioPlaybackPipeline? _audio;
     /// <summary>待上屏的解码帧队列（音画同步需要「等到点再上屏」，不能在解码回调里直接画）</summary>
@@ -143,6 +157,12 @@ public partial class MainWindow : Window
             TxtSignaling.Text = string.IsNullOrWhiteSpace(_settings.SignalingUrl)
                 ? "http://localhost:5000" : _settings.SignalingUrl;
             ChkAudioPlay.IsChecked = _settings.PlayAudio;
+            CboDecoder.SelectedIndex = _settings.DecoderPreference switch
+            {
+                "mf" => 1,
+                "ffmpeg" => 2,
+                _ => 0,
+            };
         }
         finally { _restoringSettings = false; }
     }
@@ -155,7 +175,20 @@ public partial class MainWindow : Window
         _settings.Room = TxtRoom.Text.Trim().ToUpperInvariant();
         _settings.SignalingUrl = TxtSignaling.Text.Trim();
         _settings.PlayAudio = ChkAudioPlay.IsChecked == true;
+        _settings.DecoderPreference = CboDecoder.SelectedIndex switch
+        {
+            1 => "mf",
+            2 => "ffmpeg",
+            _ => "auto",
+        };
         _settings.Save();
+    }
+
+    private void CboDecoder_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_restoringSettings) return;
+        SaveSettings();
+        Logger.Info("Viewer", $"解码器选择变更: {Preference}");
     }
 
     // ===== 连接 =====
@@ -267,8 +300,9 @@ public partial class MainWindow : Window
 
         _firstKeyframeSeen = false;
         _mfDecoderBroken = false;
+        _decoderCreateFailed = false;
         _decoderCodec = VideoCodec.H264;
-        _decoder = VideoDecoderFactory.Create(VideoCodec.H264, hevcMfAvailable: false);
+        _decoder = VideoDecoderFactory.Create(VideoCodec.H264, Preference, hevcMfAvailable: false);
         _decoder.Decoded += OnDecodedFrame;
         StartPresentThread();
 
@@ -324,8 +358,14 @@ public partial class MainWindow : Window
         await System.Threading.Tasks.Task.CompletedTask;
     }
 
-    /// <summary>HEVC 观看能力 = MF 解码探针 ∥ FFmpeg 软解兜底（能力并集，上报 Host）</summary>
-    private bool HevcWatchable => _hevcSupported == true || _ffmpegHevcOk;
+    /// <summary>HEVC 观看能力（随解码器选择联动，上报 Host）：
+    /// 自动 = MF 探针 ∥ FFmpeg 兜底；仅 MF = 只看 MF 探针；仅 FFmpeg = 只看 FFmpeg 可用性</summary>
+    private bool HevcWatchable => Preference switch
+    {
+        DecoderPreference.MediaFoundation => _hevcSupported == true,
+        DecoderPreference.Ffmpeg => _ffmpegHevcOk,
+        _ => _hevcSupported == true || _ffmpegHevcOk,
+    };
 
     /// <summary>直连 IP：建立 LAN TCP 会话（调用前需先 PrepareSession）</summary>
     private void StartSession(string host, int port, string password)
@@ -576,6 +616,8 @@ public partial class MainWindow : Window
         TxtEncrypt.Text = "加密：-";
         TxtTransport.Text = "传输：-";
         TxtEncoder.Text = "编码器：-";
+        _isConnected = false;
+        _connectedAtUtc = null;
         _hostTargetBitrateBps = 0;
         _hostDowngraded = false;
         _decoderCodec = VideoCodec.H264;
@@ -589,23 +631,78 @@ public partial class MainWindow : Window
         try
         {
             _stats.OnFrame(frame.Data.Length);
-            var keyframe = Core.Encoding.AnnexB.IsKeyframe(frame.Data, _client?.NegotiatedCodec ?? VideoCodec.H264);
+            var codec = _client?.NegotiatedCodec ?? VideoCodec.H264;
+
+            // 解码器必须在任何帧解码前就位：换解码器在网络线程同步完成。
+            // 之前挂在 Dispatcher 上异步换，Host 的 GOP 补发帧（含 IDR）会先到而被旧的
+            // H.264 解码器静默吞掉（不抛异常），换完只能干等下一个关键帧——真实桌面
+            // 低帧率下可达几十秒黑屏。同步换轨后补发的 IDR 直接送进正确解码器，接入秒开。
+            if (_decoder == null)
+            {
+                if (_decoderCreateFailed) return; // 创建失败过：本会话不再反复尝试（状态栏已说明）
+                EnsureDecoderFor(codec);
+                if (_decoder == null) return;
+            }
+            else if (_decoderCodec != codec)
+            {
+                EnsureDecoderFor(codec);
+            }
+
+            var keyframe = Core.Encoding.AnnexB.IsKeyframe(frame.Data, codec);
             if (!_firstKeyframeSeen && !keyframe)
                 return; // 丢弃 IDR 之前的帧（解码器需要从关键帧开始）
             _firstKeyframeSeen = true;
-            _decoder?.Decode(frame.Data, frame.TimestampUtc);
+            _decoder.Decode(frame.Data, frame.TimestampUtc);
         }
         catch (Exception ex)
         {
             Logger.Warn("Viewer", $"解码输入异常: {ex.Message}");
-            // 运行期兜底：MF 解码器在会话中途抛托管异常 → 强制换 FFmpeg 软解
-            //（换码后丢帧至下一 IDR/GOP 补发，状态栏由 UpdateTransportLabel 显示新路径）
-            if (_client is { NegotiatedCodec: VideoCodec.Hevc } && !_mfDecoderBroken)
+            // 运行期兜底：MF 解码器在会话中途抛托管异常 → 丢弃它，下一帧重建
+            //（Auto 模式会因此拿到 FFmpeg 软解；换码期间丢帧至下一关键帧/GOP 补发）
+            if (_decoder?.BackendName == "MF" && !_mfDecoderBroken)
             {
                 _mfDecoderBroken = true;
-                Logger.Warn("Viewer", "MF HEVC 解码器中途异常，强制切换 FFmpeg 软解兜底");
-                BeginInvokeSwapDecoder(VideoCodec.Hevc, forceFfmpeg: true);
+                Logger.Warn("Viewer", "MF 解码器中途异常，已弃用（下一帧按解码器选择重建）");
+                var broken = _decoder;
+                broken.Decoded -= OnDecodedFrame;
+                _decoder = null;
+                try { broken.Dispose(); } catch { }
             }
+        }
+    }
+
+    /// <summary>
+    /// 在网络线程同步创建/更换解码器（调用方保证：同一网络线程串行，无并发 Decode）。
+    /// 会话中途的运行期重建（MF 异常弃用后）也走这里。
+    /// </summary>
+    private void EnsureDecoderFor(VideoCodec codec)
+    {
+        var old = _decoder;
+        _decoder = null;
+        if (old != null)
+        {
+            old.Decoded -= OnDecodedFrame;
+            try { old.Flush(); } catch { }
+            try { old.Dispose(); } catch { }
+        }
+        try
+        {
+            var d = VideoDecoderFactory.Create(codec, Preference,
+                hevcMfAvailable: _hevcSupported == true && !_mfDecoderBroken);
+            d.Decoded += OnDecodedFrame;
+            _decoder = d;
+            _decoderCodec = codec;
+            _firstKeyframeSeen = false;
+            _decoderCreateFailed = false;
+            Dispatcher.BeginInvoke(UpdateTransportLabel);
+            Logger.Info("Viewer", $"会话编码为 {codec.DisplayName()}，解码器已就位（{d.BackendName}）");
+        }
+        catch (Exception ex)
+        {
+            _decoderCreateFailed = true;
+            Logger.Error("Viewer", $"{codec.DisplayName()} 解码器创建失败: {ex.Message}", ex);
+            Dispatcher.BeginInvoke(() =>
+                TxtState.Text = $"状态：无法创建 {codec.DisplayName()} 解码器（{ex.Message}）");
         }
     }
 
@@ -639,12 +736,16 @@ public partial class MainWindow : Window
             };
             if (state == ConnectionState.Connected)
             {
+                _isConnected = true;
+                _connectedAtUtc = DateTime.UtcNow;
                 UpdateTransportLabel();
                 TxtEncrypt.Text = _client?.IsEncrypted == true ? "加密：AES-256-GCM ✓" : "加密：未启用";
-                // Host 协商为 HEVC 会话而本地解码器还是 H.264 → 立即换 HEVC 解码器
-                if (_client is { NegotiatedCodec: VideoCodec.Hevc })
-                    BeginInvokeSwapDecoder(VideoCodec.Hevc);
                 TryStartAudio();
+            }
+            else
+            {
+                _isConnected = false;
+                _connectedAtUtc = null;
             }
         });
     }
@@ -658,38 +759,6 @@ public partial class MainWindow : Window
                                 : "");
     }
 
-    /// <summary>
-    /// 会话编码确定后按需更换解码器（Connected 时 Host 已把 GOP 补发帧发往本地，
-    /// 换码期间无法解码的帧会被丢弃并记日志，下一个 IDR/GOP 补发后恢复画面）。
-    /// MF 探针通过走 MF（厂商硬解机器优先），否则/失败走 FFmpeg 软解兜底。
-    /// </summary>
-    private void BeginInvokeSwapDecoder(VideoCodec codec, bool forceFfmpeg = false)
-    {
-        Dispatcher.BeginInvoke(() =>
-        {
-            if (_decoderCodec == codec && !forceFfmpeg) return;
-            var old = _decoder;
-            if (old != null) old.Decoded -= OnDecodedFrame;
-            try { old?.Flush(); } catch { }
-            try { old?.Dispose(); } catch { }
-            try
-            {
-                _decoder = VideoDecoderFactory.Create(codec,
-                    hevcMfAvailable: _hevcSupported == true && !_mfDecoderBroken && !forceFfmpeg);
-                _decoder.Decoded += OnDecodedFrame;
-                _decoderCodec = codec;
-                _firstKeyframeSeen = false;
-                UpdateTransportLabel();
-                Logger.Info("Viewer", $"会话编码为 {codec.DisplayName()}，已切换解码器（{_decoder.BackendName}）");
-            }
-            catch (Exception ex)
-            {
-                Logger.Error("Viewer", $"{codec.DisplayName()} 解码器创建失败（MF 与 FFmpeg 兜底均不可用）", ex);
-                TxtState.Text = $"状态：本机无法创建 {codec.DisplayName()} 解码器，无法观看本会话";
-            }
-        });
-    }
-
     // ===== 统计栏 =====
 
     private void UpdateStatsBar()
@@ -700,6 +769,23 @@ public partial class MainWindow : Window
         TxtBitrate.Text = _hostTargetBitrateBps > 0
             ? $"码率：{bitrate / 1000:F0} / {_hostTargetBitrateBps / 1000:F0} kbps{GapHint(bitrate)}"
             : $"码率：{bitrate / 1000:F0} kbps";
+
+        // 无画面看门狗：已连接但解码器迟迟没有输出时，把「黑屏」变成可读的原因
+        //（等待关键帧 / 解码器无输出），画面恢复后自动撤回
+        if (_isConnected && _client != null)
+        {
+            if (_decoder is { DecodedFrames: > 0 })
+            {
+                TxtState.Text = "状态：已连接 ✓";
+            }
+            else if (_connectedAtUtc is { } at && DateTime.UtcNow - at > TimeSpan.FromSeconds(5))
+            {
+                var wait = (DateTime.UtcNow - at).TotalSeconds;
+                TxtState.Text = _decoder == null
+                    ? $"状态：已连接 ✓（无画面：解码器创建失败，已 {wait:F0}s）"
+                    : $"状态：已连接 ✓（等待首个画面中，已 {wait:F0}s——解码器尚无输出，通常在等下一个关键帧）";
+            }
+        }
         TxtFps.Text = $"帧率：{fps:F1} fps";
         if (!double.IsNaN(_lastRttMs))
             TxtLatency.Text = $"延迟：≈{_lastRttMs / 2:F0} ms（网络单向）";

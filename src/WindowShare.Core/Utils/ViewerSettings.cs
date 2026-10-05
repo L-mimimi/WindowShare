@@ -24,6 +24,12 @@ public sealed class ViewerSettings
     /// </summary>
     public bool? HevcDecodeSupported { get; set; }
 
+    /// <summary>
+    /// 视频解码器选择："auto"（默认）/ "mf"（仅 Media Foundation）/ "ffmpeg"（仅 FFmpeg 软解）。
+    /// 未知值按 auto 处理。
+    /// </summary>
+    public string DecoderPreference { get; set; } = "auto";
+
     public static ViewerSettings Load() =>
         JsonSettingsStore.Load<ViewerSettings>(AppPaths.ViewerSettingsFile);
 
