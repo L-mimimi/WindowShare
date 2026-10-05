@@ -6,20 +6,20 @@ Windows 只读屏幕/窗口共享软件：**Host 端**捕获整个屏幕或指�
 
 ## 下载（Windows x64）
 
-最新版本 **v1.4.1** ｜ [全部发布版本](https://github.com/L-mimimi/WindowShare/releases)
+最新版本 **v1.4.2** ｜ [全部发布版本](https://github.com/L-mimimi/WindowShare/releases)
 
 | 类型 | 文件 | 大小 | 说明 |
 |------|------|------|------|
-| 安装版 | [WindowShare-Setup-1.4.1.exe](https://github.com/L-mimimi/WindowShare/releases/download/v1.4.0/WindowShare-Setup-1.4.1.exe) | 88.0 MB | Inno Setup per-user 安装，**无需管理员权限**；数据写入 `%APPDATA%\WindowShare` |
-| 便携版 | [WindowShare-Portable-1.4.1.zip](https://github.com/L-mimimi/WindowShare/releases/download/v1.4.0/WindowShare-Portable-1.4.1.zip) | 122.4 MB | 解压即用，可放 U 盘；数据全部存于程序目录 `data\` |
+| 安装版 | [WindowShare-Setup-1.4.2.exe](https://github.com/L-mimimi/WindowShare/releases/download/v1.4.2/WindowShare-Setup-1.4.2.exe) | 110.1 MB | Inno Setup per-user 安装，**无需管理员权限**；数据写入 `%APPDATA%\WindowShare` |
+| 便携版 | [WindowShare-Portable-1.4.2.zip](https://github.com/L-mimimi/WindowShare/releases/download/v1.4.2/WindowShare-Portable-1.4.2.zip) | 153.6 MB | 解压即用，可放 U 盘；数据全部存于程序目录 `data\` |
 
 两者均为 self-contained（win-x64），目标机器**无需预装 .NET 运行时**。系统要求：Windows 10 1903（10.0.18362）或更高。
 
 校验（SHA256）：
 
 ```
-2df94db2ce1850484457ced37d9b5dd7a688f757c708eaab0b97756168f170e1  WindowShare-Setup-1.4.1.exe
-dd481c74f89b9a77b054fc592a2c182ab6de0ff32660df6dc8f441789552f9b1  WindowShare-Portable-1.4.1.zip
+beb5aed1f2db76db52222aeb81b7bd4da2bf42283e074481babbb7f17edbd5ca  WindowShare-Setup-1.4.2.exe
+a8595c7201713a7bbe4617908a63f490c31dabf7ea65ec438958f6645a716936  WindowShare-Portable-1.4.2.zip
 ```
 
 ## 1.4.2 更新
