@@ -31,10 +31,14 @@
                     <Button DockPanel.Dock="Right" x:Name="BtnToggleShare" Width="120" Margin="8,0"
                             Background="#1E88E5" Foreground="White" FontWeight="Bold"
                             Content="开始共享" Click="BtnToggleShare_Click"/>
-                    <CheckBox DockPanel.Dock="Right" x:Name="ChkPreferHevc" Content="HEVC 优先"
-                              VerticalAlignment="Center" Margin="8,0"
-                              Checked="Setting_Changed" Unchecked="Setting_Changed"
-                              ToolTip="本机有可用 HEVC 编码器时以 HEVC 共享：同画质约省 30–50% 码率（网络受限时更清晰）。&#10;仅 1.4.0+ 且实测支持 HEVC 解码的观看端能接入，其他观看端会被提示升级；取消勾选恢复 H.264 兼容所有版本。"/>
+                    <TextBlock DockPanel.Dock="Right" Text="编码器：" VerticalAlignment="Center" Margin="8,0,0,0"/>
+                    <ComboBox DockPanel.Dock="Right" x:Name="CboEncoder" Width="170" VerticalAlignment="Center" Margin="4,0"
+                              SelectionChanged="CboEncoder_SelectionChanged"
+                              ToolTip="共享使用的视频编码：&#10;• 自动（推荐）：H.264，硬件编码器优先（厂商 MFT → DX12 包装器 → 软件），所有观看端兼容；&#10;• H.264：同「自动」，显式锁定；&#10;• HEVC 优先：同画质约省 30–50% 码率（网络受限更清晰），需本机有可用 HEVC 编码器且观看端实测支持（不支持会被拒接；本机探针失败自动回退 H.264）。注意：部分显卡只有软件 HEVC 编码，帧率有限。">
+                        <ComboBoxItem Content="自动（推荐）"/>
+                        <ComboBoxItem Content="H.264"/>
+                        <ComboBoxItem Content="HEVC 优先"/>
+                    </ComboBox>
                     <CheckBox DockPanel.Dock="Right" x:Name="ChkRecord" Content="编码验证(写H.264)"
                               VerticalAlignment="Center" Margin="8,0"
                               Checked="Setting_Changed" Unchecked="Setting_Changed"/>

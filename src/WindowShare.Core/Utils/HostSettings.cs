@@ -31,6 +31,12 @@ public sealed class HostSettings
     public bool PreferHevc { get; set; }
 
     /// <summary>
+    /// 编码器选择（1.4.3 起）："auto"（默认，H.264）/ "h264" / "hevc"（HEVC 优先）。
+    /// null=旧版设置：按 PreferHevc 迁移；未知值按 auto 处理。
+    /// </summary>
+    public string? EncoderPreference { get; set; }
+
+    /// <summary>
     /// LAN 共享监听地址（高级项，一般不改配置文件）：填本机某个 IPv4（如 192.168.1.10）
     /// 则只在该网卡监听；空 = 所有网卡。
     /// </summary>

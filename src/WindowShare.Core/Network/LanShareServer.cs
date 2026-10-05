@@ -238,6 +238,7 @@ public sealed class LanShareServer : ShareSession.IFrameSink, ShareSession.IAudi
         lock (_gopGate)
         {
             client.Authenticated = true;
+            client.LastGopReplayUtc = DateTime.UtcNow;
             replay = _gopCache.GetReplayFrames();
             foreach (var f in replay)
                 client.TryEnqueueFrame(f);
@@ -246,6 +247,26 @@ public sealed class LanShareServer : ShareSession.IFrameSink, ShareSession.IAudi
         Logging.Logger.Info("LanServer", replay.Length > 0
             ? $"已为 {client.DeviceName} 补发缓存 GOP {replay.Length} 帧（接入即出画面，无需等待下一个关键帧）"
             : $"GOP 缓存为空，{client.DeviceName} 需等待下一个关键帧");
+    }
+
+    /// <summary>把缓存 GOP 补发给指定观看者（KeyframeRequest 兜底；1 秒内重复请求去重）</summary>
+    private void ReplayGopTo(ClientSession client)
+    {
+        var now = DateTime.UtcNow;
+        lock (_gopGate)
+        {
+            // 认证时的 MarkAuthenticated 刚补发过就不再重复（解码器以 IDR 重同步虽安全，但省带宽）
+            if ((now - client.LastGopReplayUtc) < TimeSpan.FromSeconds(1))
+                return;
+            client.LastGopReplayUtc = now;
+
+            var replay = _gopCache.GetReplayFrames();
+            foreach (var f in replay)
+                client.TryEnqueueFrame(f);
+            if (replay.Length > 0)
+                Logging.Logger.Info("LanServer",
+                    $"KeyframeRequest：已为 {client.DeviceName} 补发缓存 GOP {replay.Length} 帧");
+        }
     }
 
     // ===== 接入循环 =====
@@ -543,6 +564,10 @@ public sealed class LanShareServer : ShareSession.IFrameSink, ShareSession.IAudi
                     break;
                 case MessageType.KeyframeRequest:
                     RequestKeyframe();
+                    // 编码器不认 ForceKeyFrame 时（如 Microsoft AVC/HEVC 扩展编码器），上面的
+                    // 请求是空操作——直接把缓存 GOP 补发给该观看者兜底（1s 内重复请求去重），
+                    // 观看端解码器中途重建后靠这里秒恢复画面。
+                    ReplayGopTo(client);
                     break;
                 case MessageType.Bye:
                     tcs.TrySetResult();
@@ -672,6 +697,8 @@ public sealed class LanShareServer : ShareSession.IFrameSink, ShareSession.IAudi
         public string DeviceId { get; set; } = "";
         public string DeviceName { get; set; } = "";
         public bool Authenticated { get; set; }
+        /// <summary>最近一次向该观看者补发 GOP 的时刻（KeyframeRequest 去重用）</summary>
+        public DateTime LastGopReplayUtc { get; set; } = DateTime.MinValue;
         public long SentFrames;
         public long DroppedFrames;
         /// <summary>拥塞控制统计快照</summary>

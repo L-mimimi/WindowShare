@@ -633,6 +633,21 @@ public partial class MainWindow : Window
             _stats.OnFrame(frame.Data.Length);
             var codec = _client?.NegotiatedCodec ?? VideoCodec.H264;
 
+            // MF 零输出自动换 FFmpeg：码流在到、解码器却 8 秒无输出 → 判定该平台 MF 路径失效
+            //（探针只能测构造，测不出数据路径的缺陷）。仅 Auto 模式自动换；用户显式选 MF 则尊重。
+            if (_decoder != null && codec == VideoCodec.Hevc &&
+                _decoder.BackendName == "MF" && _decoder.DecodedFrames == 0 &&
+                Preference == DecoderPreference.Auto && _ffmpegHevcOk &&
+                _connectedAtUtc is { } at0 && DateTime.UtcNow - at0 > TimeSpan.FromSeconds(8))
+            {
+                _mfDecoderBroken = true;
+                Logger.Warn("Viewer", "MF HEVC 解码器 8 秒零输出（码流在到），判定该平台 MF 路径失效，弃用重建");
+                var broken = _decoder;
+                _decoder = null;
+                broken.Decoded -= OnDecodedFrame;
+                try { broken.Dispose(); } catch { }
+            }
+
             // 解码器必须在任何帧解码前就位：换解码器在网络线程同步完成。
             // 之前挂在 Dispatcher 上异步换，Host 的 GOP 补发帧（含 IDR）会先到而被旧的
             // H.264 解码器静默吞掉（不抛异常），换完只能干等下一个关键帧——真实桌面
@@ -673,10 +688,13 @@ public partial class MainWindow : Window
 
     /// <summary>
     /// 在网络线程同步创建/更换解码器（调用方保证：同一网络线程串行，无并发 Decode）。
-    /// 会话中途的运行期重建（MF 异常弃用后）也走这里。
+    /// 会话中途的重建（MF 异常/零输出弃用后）会自动向 Host 请求重发 GOP，秒恢复画面。
     /// </summary>
     private void EnsureDecoderFor(VideoCodec codec)
     {
+        // 进入时若已在解码（_firstKeyframeSeen=true），说明是会话中途重建——
+        // 新解码器从下一个 IDR 起才能解，主动请 Host 补发缓存 GOP，不必干等编码器出 IDR
+        var midSession = _firstKeyframeSeen;
         var old = _decoder;
         _decoder = null;
         if (old != null)
@@ -696,6 +714,11 @@ public partial class MainWindow : Window
             _decoderCreateFailed = false;
             Dispatcher.BeginInvoke(UpdateTransportLabel);
             Logger.Info("Viewer", $"会话编码为 {codec.DisplayName()}，解码器已就位（{d.BackendName}）");
+            if (midSession)
+            {
+                Logger.Info("Viewer", "会话中途重建解码器 → 请求 Host 重发关键帧/GOP");
+                _client?.RequestKeyframe();
+            }
         }
         catch (Exception ex)
         {

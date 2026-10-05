@@ -136,7 +136,12 @@ public partial class MainWindow : Window
             CboFps.SelectedIndex = Math.Clamp(_settings.FpsIndex, 0, VideoFormatPlanner.FpsTiers.Length - 1);
             ChkAudio.IsChecked = _settings.ShareAudio;
             ChkRecord.IsChecked = _settings.RecordForValidation;
-            ChkPreferHevc.IsChecked = _settings.PreferHevc;
+            CboEncoder.SelectedIndex = EffectiveEncoderPreference switch
+            {
+                "hevc" => 2,
+                "h264" => 1,
+                _ => 0,
+            };
             ChkSignaling.IsChecked = _settings.EnableSignaling;
             ChkMinToTray.IsChecked = _settings.MinimizeToTray;
             ChkDiscoverable.IsChecked = _settings.Discoverable;
@@ -171,7 +176,14 @@ public partial class MainWindow : Window
         _settings.FpsIndex = Math.Max(0, CboFps.SelectedIndex);
         _settings.ShareAudio = ChkAudio.IsChecked == true;
         _settings.RecordForValidation = ChkRecord.IsChecked == true;
-        _settings.PreferHevc = ChkPreferHevc.IsChecked == true;
+        var pref = CboEncoder.SelectedIndex switch
+        {
+            2 => "hevc",
+            1 => "h264",
+            _ => "auto",
+        };
+        _settings.EncoderPreference = pref;
+        _settings.PreferHevc = pref == "hevc"; // 兼容 1.4.2 及以前的读取方
         _settings.EnableSignaling = ChkSignaling.IsChecked == true;
         _settings.MinimizeToTray = ChkMinToTray.IsChecked == true;
         _settings.Discoverable = ChkDiscoverable.IsChecked == true;
@@ -187,6 +199,16 @@ public partial class MainWindow : Window
 
     /// <summary>复选框改动即存（XAML 的 Checked/Unchecked 公用入口）</summary>
     private void Setting_Changed(object sender, RoutedEventArgs e)
+    {
+        if (!_uiReady || _restoringSettings) return;
+        SaveSettings();
+    }
+
+    /// <summary>编码器选择（含旧版 PreferHevc 迁移）：auto/h264/hevc</summary>
+    private string EffectiveEncoderPreference =>
+        _settings.EncoderPreference ?? (_settings.PreferHevc ? "hevc" : "auto");
+
+    private void CboEncoder_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (!_uiReady || _restoringSettings) return;
         SaveSettings();
@@ -364,10 +386,10 @@ public partial class MainWindow : Window
             source.Bounds.Width, source.Bounds.Height, SelectedWidth);
         var fps = SelectedFps;
 
-        // 会话编码决策：勾选「HEVC 优先」且本机有可用 HEVC 编码器 → HEVC（同画质省 30–50% 码率，
+        // 会话编码决策：选「HEVC 优先」且本机有可用 HEVC 编码器 → HEVC（同画质省 30–50% 码率，
         // 仅 1.4.0+ 观看端可接入）；否则 H.264（兼容一切版本）。探针失败自动回退，不阻断共享。
         var codec = VideoCodec.H264;
-        if (ChkPreferHevc.IsChecked == true)
+        if (EffectiveEncoderPreference == "hevc")
         {
             var hevcProbe = new EncoderSettings
             {

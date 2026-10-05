@@ -89,6 +89,20 @@ public sealed class LanShareClient : IDisposable
         _ = Task.Run(() => SessionLoopAsync(_cts.Token));
     }
 
+    /// <summary>
+    /// 请求 Host 重发关键帧/补发缓存 GOP（观看端解码器中途重建后快速恢复画面用）。
+    /// Host 侧对不认 ForceKeyFrame 的编码器会直接补发缓存 GOP（1 秒去重）。
+    /// </summary>
+    public void RequestKeyframe()
+    {
+        try
+        {
+            lock (_gate)
+                _connection?.Send(MessageType.KeyframeRequest, FrameFlags.None, ReadOnlySpan<byte>.Empty);
+        }
+        catch { /* 连接已断等情况：静默（会话循环会处理重连） */ }
+    }
+
     /// <summary>用户主动断开</summary>
     public void Stop(string reason = "")
     {
@@ -141,7 +155,7 @@ public sealed class LanShareClient : IDisposable
                 NegotiatedCodec = result.Codec;
                 backoffMs = 500; // 重置退避
 
-                // 认证成功 → 请求关键帧快速出画面
+                // 认证成功 → 请求关键帧快速出画面（Host 会补发缓存 GOP 兜底）
                 conn.Send(MessageType.KeyframeRequest, FrameFlags.None, ReadOnlySpan<byte>.Empty);
 
                 var connectedTcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
