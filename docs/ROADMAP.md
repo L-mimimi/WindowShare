@@ -1,7 +1,7 @@
 # WindowShare 路线图
 
 > 记录已确认的改进方向、诊断结论与设计草案。发布节奏：小改进随 1.3.x，质变项单独立版。
-> 最后更新：2026-10-04（诊断修正 + v1.3.3 立项）
+> 最后更新：2026-10-05（1.4.2 解码兜底专项落地 + MFT 攻坚结论固化）
 
 ## 背景与已确认事实
 
@@ -86,31 +86,37 @@
 
 **后续**：硬件 HEVC 机器（有厂商 MFT 或未来 Windows 提供 HEVC DX12 包装器）上 HEVC 优先能同时保住帧率与画质；WebRTC + HEVC 需要自定义 RTP 打包器（RFC 7798），单独立项。
 
-## 解码兜底专项：FFmpeg 软解（候选 1.4.2，已立项 2026-10-04）
+## 解码兜底专项：FFmpeg 软解（1.4.2，2026-10-05 落地）
 
 **动机**：1.4.0 实测证明「扩展 HEVC 解码 MFT」在部分机器上不可用（原生崩溃）且收件箱解码器缺席，
 HEVC 会话在这些机器上只能拒接。需要一个**永远不缺位的解码兜底**，让解码能力不再受系统组件状态支配。
 对标：RustDesk/OBS 的编解码回退链架构——系统编解码优先，软件库兜底。
 
-**方案**：libavcodec（FFmpeg）软件解码兜底，解码器选择链变为
-**MF（含扩展自报类型路径）→ 子进程探针失败 → FFmpeg 软解**；FFmpeg 还可渐进开启 d3d11va
-硬件加速（同一套代码，后续可选），最终覆盖 AV1/VP9 等更多编码也是同一 API。
+**落地结果（v1.4.2）**：解码链 = **MF（子进程探针通过时）→ FFmpeg 软解兜底 → 拒接**；
+FFmpeg 为进程内纯软件路径（libavcodec n7.1 动态链接：avcodec-61/avutil-59/swresample-5，
+Sdcb LGPL 构建，仅 ~45MB 压缩增量），Viewer 能力位变为 MF 探针 ∥ FFmpeg 可用性（能力并集）。
+低延迟配置：thread_count=1 + LOW_DELAY（Moonlight 经验），实测投喂即解出（90 帧进 90 帧出）。
+工程细节：函数走自写带版本后缀 P/Invoke（AutoGen 的裸名动态加载器与发行版 DLL 命名不兼容，
+仅复用其结构体定义）；YUV420P→BGRA 复用 Nv12ToBgra 的 BT.709 系数；运行期 MF 解码器托管异常
+自动换 FFmpeg；LGPL 合规声明见 NOTICES-Ffmpeg.md。
 
-**要点清单**：
-- 依赖最小化：仅 `avcodec-*.dll + avutil-*.dll`（NV12→BGRA 用现有 `Nv12ToBgra`，不引 swscale），
-  便携版体积 +约 30–50 MB；P/Invoke 自写（用到仅十来个函数）或 FFmpeg.AutoGen 绑定
-- **LGPL 合规**：必须 LGPL 共享构建动态链接（OBS/Chromium 同款姿势），附许可声明；
-  避开 GPL 构建与内置 x264/x265 的发行包
-- 低延迟配置：`has_b_frames=0` + 低延迟标志；现有管线按「一个完整 Annex-B 访问单元 = 一个
-  packet」投喂，与 `avcodec_send_packet / avcodec_receive_frame` 模型天然匹配
-- 能力探针扩展：Viewer 的 HEVC 解码能力 = MF 探针 ∥ FFmpeg 可用性（FFmpeg 为纯软件路径，
-  无崩溃风险，可进程内直接探测），协商协议不变
-- 验证：冒烟 Part2c 正例扩展为「MF 解码失败时 FFmpeg 解码回读」断言（在本机即可完整回归，
-  不再依赖子进程软跳过）
-- 工程量：1–2 天（含分发 DLL 与合规文件）
+**MFT 最后一轮攻坚（2026-10-05，失败，结论固化）**——四个变体（独立子进程）：
+- 基线复现：`ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING)` 必崩（AV），与自报输入类型已设/未设无关；
+- 消息顺序对调：`NOTIFY_START_OF_STREAM` 单独存活 → **崩溃点唯一锁定 BeginStreaming**；
+  但喂帧前补发 BeginStreaming 照崩 → 无绕过空间；
+- 跳过 BeginStreaming 直喂：进程存活、流/类型枚举健全（NV12/IYUV/P010/AYUV 自报类型齐全），
+  但**所有 SetOutputType（自报 + 裸占位）一律 MF_E_ATTRIBUTENOTFOUND** → 无法进入解码；
+- D3D 管理器先行（Chromium 对 D3D11-aware MFT 的标准姿势）：设备/管理器/ResetDevice 全成功，
+  `MFT_MESSAGE_SET_D3D_MANAGER` 被解码器 E_FAIL 干净拒绝。
+结论：该机器上的扩展解码 MFT 内部状态已坏（扩展/驱动层问题，非调用方姿势），不再回头；
+这类机器由 FFmpeg 路径承接，有厂商硬解 MFT 的机器仍走 MF。
 
-**验收标准**：实测「扩展解码 MFT 崩溃」的机器（本机）上，HEVC 会话可直接观看，
-状态栏正常显示实测/目标码率，Viewer 不再因解码能力被拒接。
+**验收（已达成）**：实测「扩展解码 MFT 崩溃」的机器（本机）上，HEVC 会话可直接观看——
+冒烟 Part2c 硬断言（编码 106 帧 → FFmpeg 回读 106 帧）、Part4b 端到端接入解码 66 帧；
+实启 UI 双端验证状态栏显示 `HEVC（FFmpeg）· 实测/目标 kbps`。
+
+**后续**：d3d11va 硬件加速（同一套 IVideoDecoder 契约，低功耗设备需要时再启用）；
+H.264 的 FFmpeg 兜底位已预留（收件箱 H.264 解码器可靠，暂不启用）。
 
 ## 远期 / 大专项
 

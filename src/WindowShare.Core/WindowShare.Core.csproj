@@ -23,6 +23,25 @@
     <PackageReference Include="Microsoft.AspNetCore.SignalR.Client" Version="8.0.11" />
     <!-- WebRTC（ICE/STUN/TURN/DTLS-SRTP/RTP，纯 .NET 实现） -->
     <PackageReference Include="SIPSorcery" Version="8.0.0" />
+    <!-- FFmpeg 解码兜底：只用 AutoGen 的结构体定义（AVCodecContext/AVFrame/AVPacket），
+         函数由 FfmpegInterop 自行以「带版本后缀」的方式导入（avcodec-61/avutil-59），
+         绕开 AutoGen 的裸名动态加载器（它要求 avcodec.dll 这类无后缀文件名）。
+         本包是 LGPL-3.0 的托管绑定，无原生内容、进程内零初始化副作用。 -->
+    <PackageReference Include="FFmpeg.AutoGen" Version="7.1.1" />
+    <!-- 原生 DLL 来源：Sdcb 社区构建的 FFmpeg 7.1（LGPL 共享库，仅取 avcodec/avutil/swresample 三个 DLL）。
+         ExcludeAssets=all 只为锁定/触发还原版本；构建时经下面的 None 项从 NuGet 缓存拷出。 -->
+    <PackageReference Include="Sdcb.FFmpeg.runtime.windows-x64" Version="7.1.0" ExcludeAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- FFmpeg 原生库：解码兜底动态链接（LGPL 合规要求：共享库 + 动态链接，见 NOTICES-Ffmpeg.md）。
+         swresample-5.dll 是 Sdcb 构建里 avcodec 的硬依赖（PE 导入表实测），必须一并分发 -->
+    <None Include="$(NuGetPackageRoot)sdcb.ffmpeg.runtime.windows-x64\7.1.0\runtimes\win-x64\native\avcodec-61.dll"
+          Link="avcodec-61.dll" CopyToOutputDirectory="PreserveNewest" Visible="false" />
+    <None Include="$(NuGetPackageRoot)sdcb.ffmpeg.runtime.windows-x64\7.1.0\runtimes\win-x64\native\avutil-59.dll"
+          Link="avutil-59.dll" CopyToOutputDirectory="PreserveNewest" Visible="false" />
+    <None Include="$(NuGetPackageRoot)sdcb.ffmpeg.runtime.windows-x64\7.1.0\runtimes\win-x64\native\swresample-5.dll"
+          Link="swresample-5.dll" CopyToOutputDirectory="PreserveNewest" Visible="false" />
   </ItemGroup>
 
 </Project>

@@ -22,6 +22,15 @@ Windows 只读屏幕/窗口共享软件：**Host 端**捕获整个屏幕或指�
 dd481c74f89b9a77b054fc592a2c182ab6de0ff32660df6dc8f441789552f9b1  WindowShare-Portable-1.4.1.zip
 ```
 
+## 1.4.2 更新
+
+- **FFmpeg 软解兜底：「扩展解码 MFT 崩溃」的机器看不了 HEVC 的问题彻底解决**——解码链变为 **MF（子进程探针通过时）→ FFmpeg 软解兜底 → 拒接**。FFmpeg（libavcodec）是进程内纯软件路径，随应用分发、无崩溃雷区，观看端解码能力不再受系统解码组件状态支配；实测崩溃机上 HEVC 会话从此可正常观看（冒烟端到端逐帧校验）。
+- **MFT 最后一轮攻坚（失败，结论已固化）**：实测崩溃点为 `ProcessMessage(BeginStreaming)`（与消息顺序/类型设置无关）；跳过它则流状态健全但所有 `SetOutputType` 一律 `MF_E_ATTRIBUTENOTFOUND`；D3D 管理器先行（Chromium 路线）被 E_FAIL 拒绝。结论固化进 `docs/ROADMAP.md`，这类机器直接走 FFmpeg 路径。
+- **低延迟软解**：单线程 + LOW_DELAY 标志（借 Moonlight 经验），实测投喂多少帧解出多少帧；YUV420P→BGRA 转换复用 Nv12ToBgra 的 BT.709 系数；状态栏 HEVC 标识带解码路径（`HEVC（MF）/ HEVC（FFmpeg）`）。
+- **运行期兜底**：MF HEVC 解码器会话中途抛托管异常时自动切换 FFmpeg 软解（丢帧至下一关键帧后恢复）。
+- **LGPL 合规**：FFmpeg 以共享库动态链接分发（avcodec/avutil/swresample，安装包/便携版体积约 +45 MB），声明与替换说明见 `NOTICES-Ffmpeg.md`；未使用 GPL 构建，绑定仅引用 FFmpeg.AutoGen 的结构体定义（函数加载为自写 P/Invoke）。
+- 单测 199 项（新增 YUV420P 转换与解码器工厂用例）；冒烟 Part2c 升级为硬断言（MF 探针失败的机器上 FFmpeg 解码回读逐帧校验，本机可完整回归），Part4b 正例改走能力并集（MF ∥ FFmpeg）。
+
 ## 1.4.1 更新
 
 - **修复 HEVC 会话拒接时 Viewer 的线程崩溃**：Host 发出的 WebRTC 拒接消息在 Viewer 的信令线程上直接改 UI（InvalidOperationException「调用线程无法访问此对象」），已改为 Dispatcher 调度；offer 分支同样的隐患一并修复。
@@ -140,7 +149,7 @@ WindowShare/
 - **.NET 8** + **WPF**（`net8.0-windows10.0.19041.0`）
 - 捕获：**Windows Graphics Capture**（首选）→ **DXGI Desktop Duplication**（整屏回退）→ **GDI**（兜底）
 - 编码：**Media Foundation H.264**（自动选择：注册硬件 MFT → Microsoft AVC DX12 Encoder → 软件 MFT），支持 D3D11 纹理零拷贝
-- 解码：Media Foundation H.264 Decoder MFT
+- 解码：Media Foundation 解码 MFT（H.264 收件箱 / HEVC 商店扩展或硬件 MFT）+ **FFmpeg 软解兜底**（libavcodec 动态链接，纯软件路径，永不缺位）
 - 音频：WASAPI loopback 采集（事件模式）→ 重混/重采样到 48 kHz 立体声 int16 → **Media Foundation AAC-LC 编解码**（ADTS 封装、128 kbps）→ WASAPI 共享模式渲染
 - 传输：局域网 **TCP 自定义二进制协议**；广域网 **WebRTC**（SIPSorcery，DTLS-SRTP）
 - 信令：**ASP.NET Core + SignalR**
@@ -294,6 +303,7 @@ ffprobe -f h264 "%APPDATA%\WindowShare\recordings\share-*.h264"
 - 局域网发现依赖组播：AP 隔离 / 禁组播的网络下自动失效（手输 IP 直连不受影响）；首次监听时 Windows 防火墙可能弹窗，需允许（per-user 安装不预置防火墙规则）
 - 系统声音依赖本机存在可用的播放设备与 AAC 编/解码 MFT；任一缺失即自动降级为纯视频共享（只记日志，不弹窗）
 - 系统声音固定 48 kHz / 立体声 / AAC-LC 128 kbps，采集对象跟随「默认播放设备」，共享过程中切换默认设备需重新开始共享
+- FFmpeg 软解兜底为纯软件解码：1080p 在现代 CPU 上实时富余，极低功耗设备帧率可能受限（有可用 HEVC 解码 MFT 的机器走 MF 路径，不受影响）
 
 ## 文档
 

@@ -22,8 +22,9 @@ public sealed class DecodedVideoFrame
 ///   - 输入：Annex-B 帧序列（一个访问单元一次调用）；
 ///   - 输出：NV12 → CPU 转 BGRA 回调（Viewer 显示用）；
 ///   - 自动处理首帧 STREAM_CHANGE（参数集解析出分辨率）。
+/// 与 <see cref="FfmpegVideoDecoder"/> 同实现 <see cref="IVideoDecoder"/> 契约。
 /// </summary>
-public sealed class MfVideoDecoder : IDisposable
+public sealed class MfVideoDecoder : IVideoDecoder
 {
     private static readonly Guid TransformIid = new("bf94c121-5b05-4e6f-8000-ba598961414d");
 
@@ -60,6 +61,12 @@ public sealed class MfVideoDecoder : IDisposable
     /// <summary>解码输出（解码线程上触发）</summary>
     public event Action<DecodedVideoFrame>? Decoded;
 
+    /// <summary>本解码器面向的编码格式</summary>
+    public VideoCodec Codec { get; }
+
+    /// <summary>解码实现标识（状态栏显示用）</summary>
+    public string BackendName => "MF";
+
     /// <summary>解码输出宽高（首个输出后可知）</summary>
     public int OutputWidth { get; private set; }
     public int OutputHeight { get; private set; }
@@ -80,6 +87,7 @@ public sealed class MfVideoDecoder : IDisposable
 
     public MfVideoDecoder(VideoCodec codec = VideoCodec.H264)
     {
+        Codec = codec;
         lock (MfGate)
         {
             if (_mfRefCount++ == 0)

@@ -297,15 +297,27 @@ public static class Program
             return true;
         }
 
-        // 子进程实测解码能力（原生崩溃被隔离在子进程）
+        // 子进程实测解码能力（原生崩溃被隔离在子进程）；MF 不可用时走 FFmpeg 软解兜底
         var decodeOk = ProbeHevcDecodeInSubprocess();
-        Logger.Info("Part2c", $"HEVC 解码能力（子进程探针）: {(decodeOk ? "可用" : "不可用/崩溃隔离")}");
+        Logger.Info("Part2c", $"HEVC MF 解码能力（子进程探针）: {(decodeOk ? "可用" : "不可用/崩溃隔离")}");
 
         var decoded = 0;
         var keyframes = 0;
         using var pipeline = new EncoderPipeline(settings);
-        MfVideoDecoder? decoder = decodeOk ? new MfVideoDecoder(VideoCodec.Hevc) : null;
-        if (decoder != null) decoder.Decoded += _ => Interlocked.Increment(ref decoded);
+        IVideoDecoder? decoder = null;
+        try
+        {
+            decoder = VideoDecoderFactory.Create(VideoCodec.Hevc, hevcMfAvailable: decodeOk);
+        }
+        catch (Exception ex)
+        {
+            Logger.Info("Part2c", $"MF 与 FFmpeg 兜底均不可用: {ex.Message}");
+        }
+        if (decoder != null)
+        {
+            Logger.Info("Part2c", $"解码兜底链选择: {decoder.BackendName}");
+            decoder.Decoded += _ => Interlocked.Increment(ref decoded);
+        }
         try
         {
             pipeline.Encoded += f =>
@@ -340,9 +352,9 @@ public static class Program
                 $"编码器={pipeline.EncoderName}, 编码 {encFrames} 帧（实际 {encFrames / 5.0:F0}fps）, " +
                 $"关键帧 {keyframes}, 平均码率 {bitrate / 1_000_000:F2} Mbps" +
                 $"（实测/目标 = {bitrate / settings.BitrateBps:P0}）");
-            if (decodeOk) Logger.Info("Part2c", $"解码回读 {decoded} 帧（HEVC 解码器）");
+            if (decoder != null) Logger.Info("Part2c", $"解码回读 {decoded} 帧（{decoder.BackendName}）");
 
-            var pass = encFrames >= 20 && keyframes >= 1 && (!decodeOk || decoded >= 15);
+            var pass = encFrames >= 20 && keyframes >= 1 && (decoder == null || decoded >= 15);
             Logger.Info("Part2c", pass ? "Part2c PASS" : "Part2c FAIL");
             return pass;
         }
@@ -475,18 +487,22 @@ public static class Program
                 $"负例: 被拒={rejected}, 原因=\"{failureReason}\"");
             var rejectOk = rejected && failureReason.Contains("HEVC", StringComparison.OrdinalIgnoreCase);
 
-            // ===== 正例（软性）：支持 HEVC 的观看端正常接入解码 =====
+            // ===== 正例：能力并集（MF 探针 ∥ FFmpeg 兜底）的观看端正常接入解码 =====
             bool positiveOk;
-            if (!decodeOk)
+            var ffmpegOk = FfmpegVideoDecoder.UnavailableReason() == null;
+            Logger.Info("Part4b",
+                $"观看端能力并集: MF 探针={(decodeOk ? "支持" : "不支持")}, FFmpeg 兜底={(ffmpegOk ? "可用" : "不可用")}");
+            if (!decodeOk && !ffmpegOk)
             {
-                Logger.Info("Part4b", "本机 HEVC 解码不可用（子进程探针），正例跳过");
+                Logger.Info("Part4b", "本机 HEVC 解码能力并集为空，正例跳过");
                 positiveOk = true;
             }
             else
             {
                 var connectedEvent = new ManualResetEventSlim(false);
                 long decodedFrames = 0;
-                using var decoder = new MfVideoDecoder(VideoCodec.Hevc);
+                using var decoder = VideoDecoderFactory.Create(VideoCodec.Hevc, hevcMfAvailable: decodeOk);
+                Logger.Info("Part4b", $"正例解码器: {decoder.BackendName}");
                 decoder.Decoded += _ => Interlocked.Increment(ref decodedFrames);
                 var okClient = new LanShareClient("127.0.0.1", testPort,
                     "test-viewer-device", "AutoTest Viewer", session.Password)

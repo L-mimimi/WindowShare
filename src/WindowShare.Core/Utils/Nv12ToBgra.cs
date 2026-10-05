@@ -6,23 +6,12 @@ namespace WindowShare.Core.Utils;
 /// </summary>
 public static unsafe class Nv12ToBgra
 {
-    private static readonly int[] YTable = new int[256]; // 1.164*(y-16)
-    private static readonly int[] VToR = new int[256];   // 1.596*(v-128)
-    private static readonly int[] VToG = new int[256];   // -0.813*(v-128)
-    private static readonly int[] UToG = new int[256];   // -0.391*(u-128)
-    private static readonly int[] UToB = new int[256];   // 2.018*(u-128)
-
-    static Nv12ToBgra()
-    {
-        for (var i = 0; i < 256; i++)
-        {
-            YTable[i] = (int)Math.Round(1.164 * (i - 16) * 65536);
-            VToR[i] = (int)Math.Round(1.596 * (i - 128) * 65536);
-            VToG[i] = (int)Math.Round(-0.813 * (i - 128) * 65536);
-            UToG[i] = (int)Math.Round(-0.391 * (i - 128) * 65536);
-            UToB[i] = (int)Math.Round(2.018 * (i - 128) * 65536);
-        }
-    }
+    // 系数表与 Yuv420pToBgra 共用（见 Nv12ToBgraTable）
+    private static readonly int[] YTable = Nv12ToBgraTable.Y;   // 1.164*(y-16)
+    private static readonly int[] VToR = Nv12ToBgraTable.VToR;  // 1.596*(v-128)
+    private static readonly int[] VToG = Nv12ToBgraTable.VToG;  // -0.813*(v-128)
+    private static readonly int[] UToG = Nv12ToBgraTable.UToG;  // -0.391*(u-128)
+    private static readonly int[] UToB = Nv12ToBgraTable.UToB;  // 2.018*(u-128)
 
     private static byte Clip(int v) => (byte)(v > 0xFF0000 ? 0xFF : v < 0 ? 0 : v >> 16);
 

@@ -26,7 +26,7 @@ public partial class MainWindow : Window
     private LanShareClient? _client;
     private ViewerSignalingClient? _signaling;
     private WebRtcViewerReceiver? _webRtcReceiver;
-    private MfVideoDecoder? _decoder;
+    private IVideoDecoder? _decoder;
     private readonly StatsCollector _stats = new();
     private readonly DispatcherTimer _uiTimer;
     private WriteableBitmap? _bitmap;
@@ -39,6 +39,10 @@ public partial class MainWindow : Window
     private VideoCodec _decoderCodec = VideoCodec.H264;
     /// <summary>HEVC 解码能力（子进程探针实测；null=探测中/未知 → 按 H.264 观看端接入）</summary>
     private bool? _hevcSupported;
+    /// <summary>FFmpeg 软解兜底可用（进程内实测，DLL 随应用分发，理论上恒可用）</summary>
+    private bool _ffmpegHevcOk;
+    /// <summary>MF 解码器会话中已炸过（托管异常）→ 强制换 FFmpeg 兜底，一次会话只换一次</summary>
+    private bool _mfDecoderBroken;
     /// <summary>系统声音播放管线（解码 + 抖动缓冲 + 渲染 + 音画同步主时钟）</summary>
     private AudioPlaybackPipeline? _audio;
     /// <summary>待上屏的解码帧队列（音画同步需要「等到点再上屏」，不能在解码回调里直接画）</summary>
@@ -262,8 +266,9 @@ public partial class MainWindow : Window
         TeardownSession();
 
         _firstKeyframeSeen = false;
+        _mfDecoderBroken = false;
         _decoderCodec = VideoCodec.H264;
-        _decoder = new MfVideoDecoder();
+        _decoder = VideoDecoderFactory.Create(VideoCodec.H264, hevcMfAvailable: false);
         _decoder.Decoded += OnDecodedFrame;
         StartPresentThread();
 
@@ -278,10 +283,16 @@ public partial class MainWindow : Window
     /// </summary>
     private async System.Threading.Tasks.Task ProbeHevcCapabilityAsync()
     {
+        // FFmpeg 软解兜底：进程内毫秒级实测（纯软件路径，无崩溃风险，不缓存）。
+        // 它可用 ⇒ HEVC 观看能力恒成立，不再受系统解码组件状态支配。
+        var ffReason = FfmpegVideoDecoder.UnavailableReason();
+        _ffmpegHevcOk = ffReason == null;
+        Logger.Info("Viewer", $"FFmpeg 软解兜底: {(_ffmpegHevcOk ? "可用" : $"不可用（{ffReason}）")}");
+
         if (_settings.HevcDecodeSupported is bool cached)
         {
             _hevcSupported = cached;
-            Logger.Info("Viewer", $"HEVC 解码能力（缓存）: {(cached ? "支持" : "不支持")}");
+            Logger.Info("Viewer", $"HEVC MF 解码能力（缓存）: {(cached ? "支持" : "不支持")}");
             return;
         }
         try
@@ -303,7 +314,7 @@ public partial class MainWindow : Window
             _hevcSupported = ps.ExitCode == HevcDecodeProbe.ExitOk;
             _settings.HevcDecodeSupported = _hevcSupported;
             _settings.Save();
-            Logger.Info("Viewer", $"HEVC 解码能力探测: {(_hevcSupported == true ? "支持" : "不支持")}" +
+            Logger.Info("Viewer", $"HEVC MF 解码能力探测: {(_hevcSupported == true ? "支持" : "不支持")}" +
                                   $"（exit={ps.ExitCode}）");
         }
         catch (Exception ex)
@@ -313,13 +324,16 @@ public partial class MainWindow : Window
         await System.Threading.Tasks.Task.CompletedTask;
     }
 
+    /// <summary>HEVC 观看能力 = MF 解码探针 ∥ FFmpeg 软解兜底（能力并集，上报 Host）</summary>
+    private bool HevcWatchable => _hevcSupported == true || _ffmpegHevcOk;
+
     /// <summary>直连 IP：建立 LAN TCP 会话（调用前需先 PrepareSession）</summary>
     private void StartSession(string host, int port, string password)
     {
         _client = new LanShareClient(host, port,
             AppPaths.GetOrCreateDeviceId(), AppPaths.GetMachineName(), password)
         {
-            HevcSupported = _hevcSupported == true,
+            HevcSupported = HevcWatchable,
         };
         AttachClient(_client);
         _client.Start();
@@ -365,7 +379,7 @@ public partial class MainWindow : Window
             var client = new LanShareClient(parts[0], port,
                 AppPaths.GetOrCreateDeviceId(), AppPaths.GetMachineName(), password)
             {
-                HevcSupported = _hevcSupported == true,
+                HevcSupported = HevcWatchable,
             };
             AttachClient(client);
 
@@ -584,6 +598,14 @@ public partial class MainWindow : Window
         catch (Exception ex)
         {
             Logger.Warn("Viewer", $"解码输入异常: {ex.Message}");
+            // 运行期兜底：MF 解码器在会话中途抛托管异常 → 强制换 FFmpeg 软解
+            //（换码后丢帧至下一 IDR/GOP 补发，状态栏由 UpdateTransportLabel 显示新路径）
+            if (_client is { NegotiatedCodec: VideoCodec.Hevc } && !_mfDecoderBroken)
+            {
+                _mfDecoderBroken = true;
+                Logger.Warn("Viewer", "MF HEVC 解码器中途异常，强制切换 FFmpeg 软解兜底");
+                BeginInvokeSwapDecoder(VideoCodec.Hevc, forceFfmpeg: true);
+            }
         }
     }
 
@@ -617,8 +639,7 @@ public partial class MainWindow : Window
             };
             if (state == ConnectionState.Connected)
             {
-                TxtTransport.Text = "传输：LAN TCP 直连" +
-                                    (_client is { NegotiatedCodec: VideoCodec.Hevc } ? " · HEVC" : "");
+                UpdateTransportLabel();
                 TxtEncrypt.Text = _client?.IsEncrypted == true ? "加密：AES-256-GCM ✓" : "加密：未启用";
                 // Host 协商为 HEVC 会话而本地解码器还是 H.264 → 立即换 HEVC 解码器
                 if (_client is { NegotiatedCodec: VideoCodec.Hevc })
@@ -628,31 +649,43 @@ public partial class MainWindow : Window
         });
     }
 
+    /// <summary>传输/编码状态标签（解码路径随实际创建的解码器显示）</summary>
+    private void UpdateTransportLabel()
+    {
+        TxtTransport.Text = "传输：LAN TCP 直连" +
+                            (_client is { NegotiatedCodec: VideoCodec.Hevc }
+                                ? $" · HEVC（{_decoder?.BackendName ?? "?"}）"
+                                : "");
+    }
+
     /// <summary>
     /// 会话编码确定后按需更换解码器（Connected 时 Host 已把 GOP 补发帧发往本地，
     /// 换码期间无法解码的帧会被丢弃并记日志，下一个 IDR/GOP 补发后恢复画面）。
+    /// MF 探针通过走 MF（厂商硬解机器优先），否则/失败走 FFmpeg 软解兜底。
     /// </summary>
-    private void BeginInvokeSwapDecoder(VideoCodec codec)
+    private void BeginInvokeSwapDecoder(VideoCodec codec, bool forceFfmpeg = false)
     {
         Dispatcher.BeginInvoke(() =>
         {
-            if (_decoderCodec == codec) return;
+            if (_decoderCodec == codec && !forceFfmpeg) return;
             var old = _decoder;
             if (old != null) old.Decoded -= OnDecodedFrame;
             try { old?.Flush(); } catch { }
             try { old?.Dispose(); } catch { }
             try
             {
-                _decoder = new MfVideoDecoder(codec);
+                _decoder = VideoDecoderFactory.Create(codec,
+                    hevcMfAvailable: _hevcSupported == true && !_mfDecoderBroken && !forceFfmpeg);
                 _decoder.Decoded += OnDecodedFrame;
                 _decoderCodec = codec;
                 _firstKeyframeSeen = false;
-                Logger.Info("Viewer", $"会话编码为 {codec.DisplayName()}，已切换解码器");
+                UpdateTransportLabel();
+                Logger.Info("Viewer", $"会话编码为 {codec.DisplayName()}，已切换解码器（{_decoder.BackendName}）");
             }
             catch (Exception ex)
             {
-                Logger.Error("Viewer", $"{codec.DisplayName()} 解码器创建失败（本机可能不支持 HEVC 解码）", ex);
-                TxtState.Text = $"状态：本机不支持 {codec.DisplayName()} 解码，无法观看本会话";
+                Logger.Error("Viewer", $"{codec.DisplayName()} 解码器创建失败（MF 与 FFmpeg 兜底均不可用）", ex);
+                TxtState.Text = $"状态：本机无法创建 {codec.DisplayName()} 解码器，无法观看本会话";
             }
         });
     }
