@@ -86,6 +86,32 @@
 
 **后续**：硬件 HEVC 机器（有厂商 MFT 或未来 Windows 提供 HEVC DX12 包装器）上 HEVC 优先能同时保住帧率与画质；WebRTC + HEVC 需要自定义 RTP 打包器（RFC 7798），单独立项。
 
+## 解码兜底专项：FFmpeg 软解（候选 1.4.2，已立项 2026-10-04）
+
+**动机**：1.4.0 实测证明「扩展 HEVC 解码 MFT」在部分机器上不可用（原生崩溃）且收件箱解码器缺席，
+HEVC 会话在这些机器上只能拒接。需要一个**永远不缺位的解码兜底**，让解码能力不再受系统组件状态支配。
+对标：RustDesk/OBS 的编解码回退链架构——系统编解码优先，软件库兜底。
+
+**方案**：libavcodec（FFmpeg）软件解码兜底，解码器选择链变为
+**MF（含扩展自报类型路径）→ 子进程探针失败 → FFmpeg 软解**；FFmpeg 还可渐进开启 d3d11va
+硬件加速（同一套代码，后续可选），最终覆盖 AV1/VP9 等更多编码也是同一 API。
+
+**要点清单**：
+- 依赖最小化：仅 `avcodec-*.dll + avutil-*.dll`（NV12→BGRA 用现有 `Nv12ToBgra`，不引 swscale），
+  便携版体积 +约 30–50 MB；P/Invoke 自写（用到仅十来个函数）或 FFmpeg.AutoGen 绑定
+- **LGPL 合规**：必须 LGPL 共享构建动态链接（OBS/Chromium 同款姿势），附许可声明；
+  避开 GPL 构建与内置 x264/x265 的发行包
+- 低延迟配置：`has_b_frames=0` + 低延迟标志；现有管线按「一个完整 Annex-B 访问单元 = 一个
+  packet」投喂，与 `avcodec_send_packet / avcodec_receive_frame` 模型天然匹配
+- 能力探针扩展：Viewer 的 HEVC 解码能力 = MF 探针 ∥ FFmpeg 可用性（FFmpeg 为纯软件路径，
+  无崩溃风险，可进程内直接探测），协商协议不变
+- 验证：冒烟 Part2c 正例扩展为「MF 解码失败时 FFmpeg 解码回读」断言（在本机即可完整回归，
+  不再依赖子进程软跳过）
+- 工程量：1–2 天（含分发 DLL 与合规文件）
+
+**验收标准**：实测「扩展解码 MFT 崩溃」的机器（本机）上，HEVC 会话可直接观看，
+状态栏正常显示实测/目标码率，Viewer 不再因解码能力被拒接。
+
 ## 远期 / 大专项
 
 - [ ] **浏览器免安装观看**（对标 screego/Deskreen 核心卖点）：
