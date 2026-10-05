@@ -40,8 +40,9 @@ public partial class MainWindow : Window
     private VideoCodec _decoderCodec = VideoCodec.H264;
     /// <summary>HEVC 解码能力（子进程探针实测；null=探测中/未知 → 按 H.264 观看端接入）</summary>
     private bool? _hevcSupported;
-    /// <summary>FFmpeg 软解兜底可用（进程内实测，DLL 随应用分发，理论上恒可用）</summary>
+    /// <summary>FFmpeg 软解兜底可用（惰性实测并记忆——毫秒级进程内探测，启动后台探测未完成也能正确上报能力）</summary>
     private bool _ffmpegHevcOk;
+    private bool _ffmpegProbed;
     /// <summary>MF 解码器会话中已炸过（托管异常）→ 强制换 FFmpeg 兜底，一次会话只换一次</summary>
     private bool _mfDecoderBroken;
     /// <summary>解码器创建失败过 → 本会话不再反复尝试（避免每帧异常刷屏），状态栏已说明</summary>
@@ -317,11 +318,9 @@ public partial class MainWindow : Window
     /// </summary>
     private async System.Threading.Tasks.Task ProbeHevcCapabilityAsync()
     {
-        // FFmpeg 软解兜底：进程内毫秒级实测（纯软件路径，无崩溃风险，不缓存）。
+        // FFmpeg 软解兜底：惰性实测（EnsureFfmpegProbed，纯软件路径无崩溃风险）。
         // 它可用 ⇒ HEVC 观看能力恒成立，不再受系统解码组件状态支配。
-        var ffReason = FfmpegVideoDecoder.UnavailableReason();
-        _ffmpegHevcOk = ffReason == null;
-        Logger.Info("Viewer", $"FFmpeg 软解兜底: {(_ffmpegHevcOk ? "可用" : $"不可用（{ffReason}）")}");
+        EnsureFfmpegProbed();
 
         if (_settings.HevcDecodeSupported is bool cached)
         {
@@ -358,13 +357,27 @@ public partial class MainWindow : Window
         await System.Threading.Tasks.Task.CompletedTask;
     }
 
+    /// <summary>FFmpeg 可用性惰性实测（记忆结果）：启动后台探测未完成时，连接前也能拿到正确结论，
+    /// 避免能力位误报 false 导致 HEVC 会话被 Host 拒接</summary>
+    private bool EnsureFfmpegProbed()
+    {
+        if (!_ffmpegProbed)
+        {
+            var reason = FfmpegVideoDecoder.UnavailableReason();
+            _ffmpegHevcOk = reason == null;
+            _ffmpegProbed = true;
+            Logger.Info("Viewer", $"FFmpeg 软解兜底: {(_ffmpegHevcOk ? "可用" : $"不可用（{reason}）")}");
+        }
+        return _ffmpegHevcOk;
+    }
+
     /// <summary>HEVC 观看能力（随解码器选择联动，上报 Host）：
     /// 自动 = MF 探针 ∥ FFmpeg 兜底；仅 MF = 只看 MF 探针；仅 FFmpeg = 只看 FFmpeg 可用性</summary>
     private bool HevcWatchable => Preference switch
     {
         DecoderPreference.MediaFoundation => _hevcSupported == true,
-        DecoderPreference.Ffmpeg => _ffmpegHevcOk,
-        _ => _hevcSupported == true || _ffmpegHevcOk,
+        DecoderPreference.Ffmpeg => EnsureFfmpegProbed(),
+        _ => _hevcSupported == true || EnsureFfmpegProbed(),
     };
 
     /// <summary>直连 IP：建立 LAN TCP 会话（调用前需先 PrepareSession）</summary>
@@ -763,6 +776,9 @@ public partial class MainWindow : Window
                 _connectedAtUtc = DateTime.UtcNow;
                 UpdateTransportLabel();
                 TxtEncrypt.Text = _client?.IsEncrypted == true ? "加密：AES-256-GCM ✓" : "加密：未启用";
+                // 自动重连进入的是新会话：上一会话的音频管线/同步时钟必须整体重建，
+                // 否则冻结在旧时间戳的音频时钟会把新会话的画面永久卡在「等待音频」上
+                if (_audio != null) StopAudio();
                 TryStartAudio();
             }
             else
@@ -1013,12 +1029,20 @@ public partial class MainWindow : Window
             catch (InvalidOperationException) { break; }
 
             var clock = _audio?.Clock;
+            var waitStart = System.Diagnostics.Stopwatch.GetTimestamp();
             while (clock != null && !ct.IsCancellationRequested &&
                    AvSyncClock.Decide(frame.TimestampUtc, clock.GetAudioUtcTicks()) == VideoPresentDecision.Wait)
             {
                 // 等待期间来了更新的帧就直接跳到最新帧：屏幕共享看最新画面比看全每一帧重要，
                 // 顺带还能把积压的延迟追平
                 if (_presentQueue.TryTake(out var newer)) { frame = newer; continue; }
+                // 硬上限：单帧最多等 500ms——任何时钟病理（音频断流、时钟冻结）下宁可音画
+                // 短暂不同步，也不能让画面永久卡住
+                if ((System.Diagnostics.Stopwatch.GetTimestamp() - waitStart) * 1000 /
+                    System.Diagnostics.Stopwatch.Frequency > 500)
+                {
+                    break;
+                }
                 Thread.Sleep(2);
             }
             if (ct.IsCancellationRequested) break;

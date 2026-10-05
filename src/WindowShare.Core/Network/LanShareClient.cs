@@ -203,8 +203,10 @@ public sealed class LanShareClient : IDisposable
                 lock (_gate) if (_connection == conn) _connection = null;
             }
 
-            // 认证被拒（Failed）则退出循环；其他情况指数退避重连
+            // 认证被拒（Failed）则退出循环；用户主动断开（Disconnected/取消）同样退出——
+            // 否则会打印「Xms 后重连…」的误导日志（实际已随取消退出）
             if (State == ConnectionState.Failed) break;
+            if (ct.IsCancellationRequested || State == ConnectionState.Disconnected) break;
 
             Logging.Logger.Info("LanClient", $"{backoffMs}ms 后重连…");
             try { await Task.Delay(backoffMs, ct); }

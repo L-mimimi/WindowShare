@@ -35,13 +35,30 @@ public sealed class AvSyncClock
     private long _audioSetQpc;     // 更新那一刻的 QPC（外推基准）
     private bool _valid;
 
+    // 冻结检测：音频欠载时 GetPlaybackUtcTicks 返回不再前进的时间戳，而时钟定时器
+    // 仍在周期性刷新——仅凭「有没有 Update 调用」的失效判断会被骗过（视频会以
+    // 「画面比声音早几分钟」的理由永久等待）。这里额外跟踪「值不前进」的持续时长。
+    private long _lastUpdatedUtc;
+    private long _frozenSinceQpc;
+
     /// <summary>音频播放位置推进（渲染线程周期调用；utcTicks 是当前正在播放的采样的采集时间戳）</summary>
     public void Update(long utcTicks)
     {
         lock (_gate)
         {
+            var nowQpc = System.Diagnostics.Stopwatch.GetTimestamp();
+            if (utcTicks <= _lastUpdatedUtc && _valid)
+            {
+                // 值没有前进：开始（或继续）冻结计时
+                _frozenSinceQpc = _frozenSinceQpc == 0 ? nowQpc : _frozenSinceQpc;
+            }
+            else
+            {
+                _frozenSinceQpc = 0;
+            }
+            _lastUpdatedUtc = utcTicks;
             _audioUtcTicks = utcTicks;
-            _audioSetQpc = System.Diagnostics.Stopwatch.GetTimestamp();
+            _audioSetQpc = nowQpc;
             _valid = true;
         }
     }
@@ -53,6 +70,8 @@ public sealed class AvSyncClock
         {
             _audioUtcTicks = 0;
             _audioSetQpc = 0;
+            _lastUpdatedUtc = 0;
+            _frozenSinceQpc = 0;
             _valid = false;
         }
     }
@@ -66,6 +85,13 @@ public sealed class AvSyncClock
             var nowQpc = System.Diagnostics.Stopwatch.GetTimestamp();
             var elapsedTicks = (nowQpc - _audioSetQpc) * TimeSpan.TicksPerSecond / QpcFrequency;
             if (elapsedTicks > StaleTicks || elapsedTicks < 0)
+            {
+                _valid = false;
+                return null;
+            }
+            // 冻结检测：值持续不前进超过 StaleTicks → 视为音频时钟失效（与无更新同等对待）
+            if (_frozenSinceQpc != 0 &&
+                (nowQpc - _frozenSinceQpc) * TimeSpan.TicksPerSecond / QpcFrequency > StaleTicks)
             {
                 _valid = false;
                 return null;

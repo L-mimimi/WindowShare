@@ -386,6 +386,41 @@ public class AvSyncClockTests
     }
 
     [Fact]
+    public void Clock_FrozenUpdates_InvalidateAfterStalePeriod()
+    {
+        // 音频欠载时 GetPlaybackUtcTicks 返回冻结的时间戳，而时钟定时器仍在刷新——
+        // 仅凭「有 Update 调用」的失效判断会被骗过，视频会以「画面比声音早几分钟」
+        // 的理由永久等待（实测「连接成功但画面卡住」的根因）。值持续不前进必须失效。
+        var clock = new AvSyncClock();
+        var frozenTs = DateTime.UtcNow.Ticks;
+        var deadline = DateTime.UtcNow.AddMilliseconds(600);
+        while (DateTime.UtcNow < deadline)
+        {
+            clock.Update(frozenTs); // 模拟时钟定时器拿冻结值周期刷新
+            Thread.Sleep(20);
+        }
+        Assert.Null(clock.GetAudioUtcTicks());
+        Assert.False(clock.IsActive);
+    }
+
+    [Fact]
+    public void Clock_AdvancingUpdates_StaysValid()
+    {
+        // 正常播放：值持续推进，时钟保持有效（与冻结用例对照）
+        var clock = new AvSyncClock();
+        var ts = DateTime.UtcNow.Ticks;
+        var deadline = DateTime.UtcNow.AddMilliseconds(600);
+        while (DateTime.UtcNow < deadline)
+        {
+            ts += TimeSpan.TicksPerMillisecond * 20; // 每 20ms 推进 20ms
+            clock.Update(ts);
+            Thread.Sleep(20);
+        }
+        Assert.NotNull(clock.GetAudioUtcTicks());
+        Assert.True(clock.IsActive);
+    }
+
+    [Fact]
     public void OffsetMs_IsPositiveWhenVideoIsEarly()
     {
         var audio = 1_000_000L;
