@@ -109,6 +109,7 @@ public partial class MainWindow : Window
     private long _maxPresentGapMs;
     private long _skippedCount;
     private int _statsBarTicks;
+    private long _presentCountPerSec; // 每秒真实上屏数（状态栏「帧率」的数据源）
 
     /// <summary>解析连接类 CLI 参数并填入界面（密码可走参数但不落盘，与其他输入一致）</summary>
     private void ApplyCliArgs(string[] args)
@@ -896,7 +897,10 @@ public partial class MainWindow : Window
                     : $"状态：已连接 ✓（等待首个画面中，已 {wait:F0}s——解码器尚无输出，通常在等下一个关键帧）";
             }
         }
-        TxtFps.Text = $"帧率：{fps:F1} fps";
+        // 帧率显示真实「上屏帧率」（PresentLoop 实际写屏幕的帧数），而不是解码/接收帧率——
+        // 二者可能相差数倍，旧口径会掩盖「解码正常但上屏被卡」的卡顿
+        var presentFps = (float)Interlocked.Exchange(ref _presentCountPerSec, 0);
+        TxtFps.Text = $"帧率：{presentFps:F1} fps";
         if (!double.IsNaN(_lastRttMs))
             TxtLatency.Text = $"延迟：≈{_lastRttMs / 2:F0} ms（网络单向）";
 
@@ -1132,41 +1136,30 @@ public partial class MainWindow : Window
             catch (OperationCanceledException) { break; }
             catch (InvalidOperationException) { break; }
 
-            var clock = _audio?.Clock;
+            var audioTicks = _audio?.Clock.GetAudioUtcTicks();
 
-            // 追平积压：只跳过「已迟到」的帧（时钟已越过其上屏点），停在最新的已到点帧上。
-            // 未到点的帧绝不跳过——它们各有各的时隙。v1.5.0 的旧逻辑在等待期无条件跳到
-            // 最新帧，而抖动缓冲深度（120-160ms）> 提前量（40ms）时每一帧都在等待期被
-            // 下一帧顶掉：解码 21fps 只剩 7fps 上屏，画面肉眼卡顿而码率/帧率计数一切正常。
+            // 视频自由上屏（flow-first，v1.5.2）：解码出一帧就上屏一帧，上屏率 = 解码率。
+            //
+            // 为什么不再逐帧等音频时钟：音频管线的固有延迟（设备缓冲 100ms + 抖动缓冲 +
+            // 编解码/网络 ≈ 数百 ms）让视频时间戳永远「领先」音频播放位置——逐帧等待的
+            // 上屏率被音频延迟钉死（实测 56fps 解码只剩 8fps 上屏，每帧等满硬上限），
+            // 而 AV 同步收益只是 lip-sync 对齐。取舍：流畅优先，仅当帧严重滞后
+            //（落后音频时钟 500ms 以上，即会话停顿后追赶）才跳帧。
             while (!ct.IsCancellationRequested && _presentQueue.TryTake(out var newer))
             {
-                if (AvSyncClock.Decide(newer.TimestampUtc, clock?.GetAudioUtcTicks()) == VideoPresentDecision.Present)
+                if (audioTicks != null &&
+                    frame.TimestampUtc < audioTicks.Value - TimeSpan.TicksPerMillisecond * 500)
                 {
-                    frame.ReturnBuffer?.Invoke(); // 迟到的旧帧直接归还缓冲（Q3）
+                    frame.ReturnBuffer?.Invoke(); // 严重滞后的旧帧（停顿积压）直接归还缓冲（Q3）
                     Interlocked.Increment(ref _skippedCount);
                     frame = newer;
                 }
                 else
                 {
-                    pending = newer; // 还没到点：留给下一轮按它自己的时隙上屏
+                    pending = newer; // 新鲜帧：留给下一轮立即上屏
                     break;
                 }
             }
-
-            // 等当前帧的时隙；硬上限 120ms——音频时钟病理（反复短暂冻结）时不把视频拖成幻灯片，
-            // 宁可短暂音画不同步，音频恢复后自动重新对齐
-            var waitStart = System.Diagnostics.Stopwatch.GetTimestamp();
-            while (clock != null && !ct.IsCancellationRequested &&
-                   AvSyncClock.Decide(frame.TimestampUtc, clock.GetAudioUtcTicks()) == VideoPresentDecision.Wait)
-            {
-                if ((System.Diagnostics.Stopwatch.GetTimestamp() - waitStart) * 1000 /
-                    System.Diagnostics.Stopwatch.Frequency > 120)
-                {
-                    break;
-                }
-                Thread.Sleep(2);
-            }
-            if (ct.IsCancellationRequested) break;
 
             var now = System.Diagnostics.Stopwatch.GetTimestamp();
             if (lastPresentTicks != 0)
@@ -1177,6 +1170,7 @@ public partial class MainWindow : Window
             }
             lastPresentTicks = now;
             Interlocked.Increment(ref _presentCount);
+            Interlocked.Increment(ref _presentCountPerSec);
 
             RenderFrame(frame);
         }

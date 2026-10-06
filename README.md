@@ -6,21 +6,27 @@ Windows 只读屏幕/窗口共享软件：**Host 端**捕获整个屏幕或指�
 
 ## 下载（Windows x64）
 
-最新版本 **v1.5.1** ｜ [全部发布版本](https://github.com/L-mimimi/WindowShare/releases)
+最新版本 **v1.5.2** ｜ [全部发布版本](https://github.com/L-mimimi/WindowShare/releases)
 
 | 类型 | 文件 | 大小 | 说明 |
 |------|------|------|------|
-| 安装版 | [WindowShare-Setup-1.5.1.exe](https://github.com/L-mimimi/WindowShare/releases/download/v1.5.1/WindowShare-Setup-1.5.1.exe) | 110.1 MB | Inno Setup per-user 安装，**无需管理员权限**；数据写入 `%APPDATA%\WindowShare` |
-| 便携版 | [WindowShare-Portable-1.5.1.zip](https://github.com/L-mimimi/WindowShare/releases/download/v1.5.1/WindowShare-Portable-1.5.1.zip) | 153.6 MB | 解压即用，可放 U 盘；数据全部存于程序目录 `data\` |
+| 安装版 | [WindowShare-Setup-1.5.2.exe](https://github.com/L-mimimi/WindowShare/releases/download/v1.5.2/WindowShare-Setup-1.5.2.exe) | 110.1 MB | Inno Setup per-user 安装，**无需管理员权限**；数据写入 `%APPDATA%\WindowShare` |
+| 便携版 | [WindowShare-Portable-1.5.2.zip](https://github.com/L-mimimi/WindowShare/releases/download/v1.5.2/WindowShare-Portable-1.5.2.zip) | 153.6 MB | 解压即用，可放 U 盘；数据全部存于程序目录 `data\` |
 
 两者均为 self-contained（win-x64），目标机器**无需预装 .NET 运行时**。系统要求：Windows 10 1903（10.0.18362）或更高。
 
 校验（SHA256）：
 
 ```
-fb553aafe251f2d1504b8c559a89f986a51109151ad25781e89ac84e38967883  WindowShare-Setup-1.5.1.exe
-a1e0a73dc76e691ac72f4c6dab4cf9e6d340af2ca7b14492b257f9d8b758bcdd  WindowShare-Portable-1.5.1.zip
+2db7bf1913be36f8f88d3fb3ea74b4b362d13b39ae277dbc7c032eb15e2f1e67  WindowShare-Setup-1.5.2.exe
+58c9a8b9118b33583c6c53ea994ae123c856c8b9cdcca69302f0e6d77d4ecaf1  WindowShare-Portable-1.5.2.zip
 ```
+
+## 1.5.2 更新
+
+- **上屏策略改为「视频自由上屏」（流畅优先，重要）**：v1.5.1 的逐帧等待仍被音频管线固有延迟（设备缓冲 100ms + 抖动缓冲 + 编解码/网络，合计数百 ms）钉死——实测 56fps 解码只剩 8fps 上屏（每帧等满硬上限、跳帧 0、队列积压满）。现在**解码一帧上屏一帧**（上屏率 = 解码率），音频时钟只用于停顿后丢弃严重滞后（>500ms）的积压帧。实测：上屏 21fps 与解码 1:1、跳帧 0、队列积压 0、最大帧间隔 57ms。取舍：画面流畅与低延迟优先于 lip-sync 逐帧对齐（屏幕共享场景声音主要是系统声/人声，恒定的轻微音画偏差远不如卡顿明显）。
+- **状态栏「帧率」改为真实上屏帧率**：此前显示解码/接收帧率，与实际画面刷新可能相差数倍，掩盖卡顿。现在显示 PresentLoop 实际写屏帧率。
+- 单测 207 项、冒烟 11 项、UIA 回归全 PASS。
 
 ## 1.5.1 更新
 
