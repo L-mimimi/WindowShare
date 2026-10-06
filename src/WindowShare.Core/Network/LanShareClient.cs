@@ -237,7 +237,7 @@ public sealed class LanShareClient : IDisposable
             //    如 HEVC 会话拒接不支持的观看端——把真实原因带给用户而不是报「未响应质询」）
             var challengeFrame = conn.ReadFrame();
             if (challengeFrame == null)
-                return new AuthOutcome(false, "Host 未响应认证质询", false, "");
+                return new AuthOutcome(false, "Host 无响应（首次连接请在 Host 端批准本设备后自动重连）", false, "");
             if (challengeFrame.Value.Header.Type == MessageType.AuthResult)
             {
                 var earlyReject = AuthPayload.Deserialize<AuthResultPayload>(challengeFrame.Value.Payload);
@@ -246,7 +246,7 @@ public sealed class LanShareClient : IDisposable
                     false, "");
             }
             if (challengeFrame.Value.Header.Type != MessageType.AuthChallenge)
-                return new AuthOutcome(false, "Host 未响应认证质询", false, "");
+                return new AuthOutcome(false, "Host 返回了意外的认证消息", false, "");
             var challenge = AuthPayload.Deserialize<AuthChallengePayload>(challengeFrame.Value.Payload);
             if (challenge == null)
                 return new AuthOutcome(false, "质询格式错误", false, "");

@@ -39,17 +39,17 @@
                         <ComboBoxItem Content="H.264"/>
                         <ComboBoxItem Content="HEVC 优先"/>
                     </ComboBox>
-                    <CheckBox DockPanel.Dock="Right" x:Name="ChkRecord" Content="编码验证(写H.264)"
-                              VerticalAlignment="Center" Margin="8,0"
-                              Checked="Setting_Changed" Unchecked="Setting_Changed"/>
+                </DockPanel>
+
+                <!-- 第 2 行：分辨率（最高 4K）+ 帧率档位 + 自动码率 + 输出选项（原第 1 行右侧因窗口宽度不足被裁剪，移至本行） -->
+                <DockPanel Grid.Row="1" LastChildFill="False" Margin="0,6,0,0">
                     <CheckBox DockPanel.Dock="Right" x:Name="ChkAudio" Content="共享系统声音" IsChecked="True"
                               VerticalAlignment="Center" Margin="8,0"
                               Checked="Setting_Changed" Unchecked="Setting_Changed"
                               ToolTip="共享本机正在播放的声音（游戏/视频/音乐/系统提示音），不是麦克风。&#10;开始共享后修改不生效，需停止后重新开始。&#10;没有播放设备或没有 AAC 编码器时会自动降级为纯视频共享。"/>
-                </DockPanel>
-
-                <!-- 第 2 行：分辨率（最高 4K）+ 帧率档位 + 自动码率 -->
-                <DockPanel Grid.Row="1" LastChildFill="False" Margin="0,6,0,0">
+                    <CheckBox DockPanel.Dock="Right" x:Name="ChkRecord" Content="编码验证(写H.264)"
+                              VerticalAlignment="Center" Margin="8,0"
+                              Checked="Setting_Changed" Unchecked="Setting_Changed"/>
                     <TextBlock DockPanel.Dock="Left" Text="分辨率：" VerticalAlignment="Center"/>
                     <ComboBox DockPanel.Dock="Left" x:Name="CboResolution" Width="180" Margin="4"
                               SelectionChanged="Quality_SelectionChanged"/>

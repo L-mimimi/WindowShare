@@ -107,6 +107,26 @@ internal static unsafe class FfmpegInterop
     [DllImport(LibAvutil, CallingConvention = CallingConvention.Cdecl)]
     internal static extern void av_log_set_level(int level);
 
+    // ---- 编码方向（FfmpegVideoEncoder；to1.5.0 Step 2）----
+    [DllImport(LibAvcodec, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr avcodec_find_encoder_by_name(string name);
+
+    [DllImport(LibAvcodec, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int avcodec_send_frame(AVCodecContext* ctx, AVFrame* frame);
+
+    [DllImport(LibAvcodec, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int avcodec_receive_packet(AVCodecContext* ctx, AVPacket* pkt);
+
+    [DllImport(LibAvutil, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int av_frame_get_buffer(AVFrame* frame, int align);
+
+    /// <summary>对 AVCodecContext.priv_data 设置后端私有选项（nvenc tune/rc 等）；失败返回负值不抛异常</summary>
+    [DllImport(LibAvutil, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern int av_opt_set(void* obj, string name, string val, int search_flags);
+
+    /// <summary>AV_PIX_FMT_NV12（8-bit Y + 交织 UV 双平面）</summary>
+    internal const int PixFmtNv12 = 23;
+
     /// <summary>
     /// 原生库是否可用（探针：毫秒级、纯软件路径、无崩溃风险，进程内直接实测）。
     /// 找不到 DLL、版本异常或 HEVC 解码器缺失都算不可用，返回失败原因。

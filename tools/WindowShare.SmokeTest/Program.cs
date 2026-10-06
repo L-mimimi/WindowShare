@@ -45,6 +45,7 @@ public static class Program
             var ok2 = RunPart("Part2", Part2SyntheticEncode);
             var ok2b = RunPart("Part2b", Part2bHighResAndHighFps);
             var ok2c = RunPart("Part2c", Part2cHevcRoundtrip);
+            var ok2d = RunPart("Part2d", Part2dFfmpegVendorEncode);
             var ok3 = RunPart("Part3", Part3RealCapture);
             var ok4 = RunPart("Part4", Part4LoopbackE2E);
             var ok4b = RunPart("Part4b", Part4bHevcNegotiation);
@@ -55,11 +56,12 @@ public static class Program
             Logger.Info("SmokeTest",
                 $"===== 结果: 合成编码={(ok2 ? "PASS" : "FAIL")}, " +
                 $"4K/高帧率={(ok2b ? "PASS" : "FAIL")}, HEVC往返={(ok2c ? "PASS" : "FAIL")}, " +
+                $"厂商硬编={(ok2d ? "PASS" : "FAIL")}, " +
                 $"真实捕获={(ok3 ? "PASS" : "FAIL")}, 回环端到端={(ok4 ? "PASS" : "FAIL")}, " +
                 $"HEVC协商={(ok4b ? "PASS" : "FAIL")}, " +
                 $"信令={(ok5 ? "PASS" : "FAIL")}, WebRTC={(ok6 ? "PASS" : "FAIL")}, " +
                 $"系统声音={(ok7 ? "PASS" : "FAIL")}, 局域网发现={(ok8 ? "PASS" : "FAIL")} =====");
-            return ok2 && ok2b && ok2c && ok3 && ok4 && ok4b && ok5 && ok6 && ok7 && ok8 ? 0 : 1;
+            return ok2 && ok2b && ok2c && ok2d && ok3 && ok4 && ok4b && ok5 && ok6 && ok7 && ok8 ? 0 : 1;
         }
         catch (Exception ex)
         {
@@ -362,6 +364,88 @@ public static class Program
         {
             decoder?.Dispose();
         }
+    }
+
+    /// <summary>
+    /// FFmpeg 厂商硬编验证（to1.5.0 Step 4）：生产管线全链路（工厂选后端 + staging 回读）。
+    /// 核心断言：实测/目标码率比 ≥ 50%——防回归「编码器欠产出」（DX12 收件箱编码器 5–10% 是病根；
+    /// Step 0 实测 NVENC CBR ≈100%）。无厂商 GPU 的机器（CI runner）自动软性跳过。
+    /// </summary>
+    private static bool Part2dFfmpegVendorEncode()
+    {
+        Logger.Info("Part2d", "---- FFmpeg 厂商硬编验证（1280x720@30, 5 秒，真实 CBR 断言）----");
+        const int width = 1280, height = 720, fps = 30, seconds = 5;
+        var settings = new EncoderSettings
+        {
+            Width = width,
+            Height = height,
+            Fps = fps,
+            BitrateBps = 3_000_000,
+            GopSize = 60,
+        };
+        if (!FfmpegVideoEncoder.ProbeAvailable(settings))
+        {
+            Logger.Info("Part2d", "本机无 FFmpeg 厂商硬编（nvenc/amf/qsv 均不可用）→ 跳过（工厂自动走 MF 现链）");
+            Logger.Info("Part2d", "Part2d PASS（软性）");
+            return true;
+        }
+
+        var decoded = 0;
+        var keyframes = 0;
+        using var pipeline = new EncoderPipeline(settings);
+        Logger.Info("Part2d", $"工厂选择: {pipeline.EncoderName} (硬件={pipeline.IsHardwareEncoder}, 零拷贝={pipeline.IsZeroCopy})");
+        var isVendor = pipeline.EncoderName.Contains("nvenc") ||
+                       pipeline.EncoderName.Contains("amf") ||
+                       pipeline.EncoderName.Contains("qsv");
+        if (!isVendor)
+        {
+            Logger.Info("Part2d", $"探测有厂商硬编但工厂未选中（得到 {pipeline.EncoderName}）——选择链逻辑异常");
+            Logger.Info("Part2d", "Part2d FAIL");
+            return false;
+        }
+
+        using var decoder = FfmpegVideoDecoder.TryCreate(VideoCodec.H264);
+        if (decoder != null)
+        {
+            decoder.Decoded += _ => Interlocked.Increment(ref decoded);
+            Logger.Info("Part2d", "解码回读: FFmpeg 软解（H.264）");
+        }
+        pipeline.Encoded += f =>
+        {
+            if (f.Keyframe) Interlocked.Increment(ref keyframes);
+            decoder?.Decode(f.Data, f.TimestampUtc);
+        };
+
+        var bgra = new byte[width * height * 4];
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var frameInterval = TimeSpan.FromMilliseconds(1000.0 / fps);
+        while (sw.Elapsed < TimeSpan.FromSeconds(seconds))
+        {
+            DrawPattern(bgra, width, height, sw.Elapsed.TotalSeconds);
+            pipeline.Submit(new CaptureFrame
+            {
+                Width = width,
+                Height = height,
+                TimestampUtc = DateTime.UtcNow.Ticks,
+                QpcTimestamp = System.Diagnostics.Stopwatch.GetTimestamp(),
+                BgraPixels = (byte[])bgra.Clone(),
+            });
+            Thread.Sleep(Math.Max(1, (int)frameInterval.TotalMilliseconds));
+        }
+        Thread.Sleep(800);
+
+        var (encFrames, encBytes) = pipeline.GetCounters();
+        decoder?.Flush();
+        var bitrate = encBytes * 8.0 / seconds;
+        var ratio = bitrate / settings.BitrateBps;
+        Logger.Info("Part2d",
+            $"编码 {encFrames} 帧（实际 {encFrames / (double)seconds:F0}fps）, 关键帧 {keyframes}, " +
+            $"平均码率 {bitrate / 1_000_000:F2} Mbps（实测/目标 = {ratio:P0}，目标 {settings.BitrateBps / 1_000_000.0:F1}）");
+        if (decoder != null) Logger.Info("Part2d", $"解码回读 {decoded} 帧（FFmpeg）");
+
+        var pass = encFrames >= 75 && ratio >= 0.50 && keyframes >= 1 && (decoder == null || decoded >= 60);
+        Logger.Info("Part2d", pass ? "Part2d PASS" : "Part2d FAIL");
+        return pass;
     }
 
     /// <summary>以子进程方式实测 HEVC 解码能力（扩展 MFT 的原生崩溃被隔离在子进程）</summary>

@@ -14,8 +14,9 @@ public sealed class EncoderPipeline : IDisposable
 {
     private readonly ID3D11Device _device;
     private readonly GpuVideoProcessor _videoProcessor;
-    // 输出尺寸变化时会整体重建（见 UpdateOutputSize），因此不是 readonly
-    private MfVideoEncoder _encoder;
+    // 输出尺寸变化时会整体重建（见 UpdateOutputSize），因此不是 readonly。
+    // 接口类型：MfVideoEncoder 之外，FFmpeg 厂商硬编等后端共用同一契约（Step 1 抽象）。
+    private IVideoEncoder _encoder;
     private readonly object _gate = new();
 
     private int _outWidth;      // 当前编码输出宽
@@ -71,7 +72,7 @@ public sealed class EncoderPipeline : IDisposable
         _device = D3D11DevicePool.GetOrCreate();
         _videoProcessor = new GpuVideoProcessor(_device);
         // 传入共享设备：硬件编码器直接吃 GPU NV12 纹理（零拷贝）
-        _encoder = new MfVideoEncoder(Settings, _device);
+        _encoder = CreateEncoder(Settings);
         _encoder.Encoded += OnEncoderOutput;
         Logger.Info("Pipeline",
             $"编码管线就绪: {_outWidth}x{_outHeight} @ {Settings.Fps}fps, " +
@@ -173,6 +174,12 @@ public sealed class EncoderPipeline : IDisposable
     }
 
     /// <summary>
+    /// 编码器构造入口（Step 3 工厂化）：FFmpeg 厂商硬编（探测到 nvenc/amf/qsv）→ MF 现链，
+    /// 全部失败抛异常（现状语义）。
+    /// </summary>
+    private IVideoEncoder CreateEncoder(EncoderSettings settings) => VideoEncoderFactory.Create(settings, _device);
+
+    /// <summary>
     /// 动态分辨率：更新编码输出尺寸上限（等比缩放由 VideoProcessor 完成）。
     /// 实际输出 = min(上限, 源尺寸)，因此恢复时传回原始尺寸即可。
     /// </summary>
@@ -202,10 +209,10 @@ public sealed class EncoderPipeline : IDisposable
     {
         var settings = Settings with { Width = w, Height = h };
 
-        MfVideoEncoder next;
+        IVideoEncoder next;
         try
         {
-            next = new MfVideoEncoder(settings, _device);
+            next = CreateEncoder(settings);
         }
         catch (Exception ex)
         {
@@ -338,7 +345,7 @@ public sealed class EncoderPipeline : IDisposable
 
     public void Dispose()
     {
-        MfVideoEncoder encoder;
+        IVideoEncoder encoder;
         lock (_gate) encoder = _encoder;
         encoder.Dispose();
         _videoProcessor.Dispose();

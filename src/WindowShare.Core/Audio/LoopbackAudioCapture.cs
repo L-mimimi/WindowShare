@@ -9,12 +9,16 @@ namespace WindowShare.Core.Audio;
 /// 采的是「默认渲染端点正在播放的内容」，也就是系统内音频（游戏/视频/音乐），
 /// 不是麦克风：loopback 从扬声器这条路上取数据，环境噪声与本机麦克风输入都不会进来。
 ///
-/// 两个必须处理的坑：
+/// 三个必须处理的坑：
 ///   1) 系统静音时 loopback 一个数据包都不产（音频引擎会停时钟）。若不处理，音频流会
 ///      断断续续，Viewer 端的音频时钟也跟着停，音画同步直接失效。因此这里主动补静音块，
 ///      保证输出严格是实时连续流。
 ///   2) 设备混音格式是 float32、声道数与采样率由系统决定（44.1k/48k、2/6/8 声道都可能），
 ///      而 AAC 编码统一走 48 kHz 立体声，所以采集侧就地完成重混 + 重采样。
+///   3) 设备会失效（默认设备切换、虚拟声卡重置、拔插耳机等，GetNextPacketSize 返回
+///      AUDCLNT_E_DEVICE_INVALIDATED）：必须重建采集管线而不是带着死链路空转——否则
+///      每个轮询周期刷一条 Warn（实测 3ms 一次、75k 行）且真实声音再也回不来。
+///      重建按指数退避（0.5s→5s 封顶），期间持续补静音块保持时间线与 Viewer 时钟连续。
 /// </summary>
 public sealed class LoopbackAudioCapture : IDisposable
 {
@@ -24,6 +28,8 @@ public sealed class LoopbackAudioCapture : IDisposable
     private const long GapThresholdTicks = TimeSpan.TicksPerMillisecond * 5;
     /// <summary>轮询间隔：比 20ms 的块长小一个量级，保证不会攒出大块延迟</summary>
     private const int PollIntervalMs = 2;
+    /// <summary>连续读取失败达该次数即判定设备失效、触发重建（≈50ms，单次偶发失败不触发）</summary>
+    private const int MaxConsecutiveReadFailures = 25;
 
     private Thread? _thread;
     private CancellationTokenSource? _cts;
@@ -110,19 +116,35 @@ public sealed class LoopbackAudioCapture : IDisposable
 
     private void Run()
     {
-        IMMDevice? device = null;
-        IAudioClient? client = null;
-        IAudioCaptureClient? capture = null;
-        var mixPtr = IntPtr.Zero;
         try
         {
-            device = Wasapi.GetDefaultRenderDevice();
-            client = Wasapi.ActivateAudioClient(device);
+            var (client, capture) = InitCaptureClient();
+            _ready?.Set();
+            CaptureLoop(client, capture, _cts!.Token);
+        }
+        catch (Exception ex)
+        {
+            // 首次初始化失败：上报给 Start()，由调用方降级为纯视频共享（保持原语义）
+            _initError = ex;
+            try { _ready?.Set(); } catch { }
+        }
+    }
 
-            var hr = client.GetMixFormat(out mixPtr);
-            if (hr != 0 || mixPtr == IntPtr.Zero)
-                throw new InvalidOperationException($"取混音格式失败 (HRESULT {Wasapi.Describe(hr)})");
+    /// <summary>
+    /// 创建 WASAPI loopback 采集链（默认渲染端点 → 激活 → 按混音格式初始化 → 取 CaptureClient）。
+    /// 可重入：设备失效后由采集线程重新调用，自动跟随新默认设备。
+    /// </summary>
+    private (IAudioClient Client, IAudioCaptureClient Capture) InitCaptureClient()
+    {
+        var device = Wasapi.GetDefaultRenderDevice();
+        var client = Wasapi.ActivateAudioClient(device);
 
+        var hr = client.GetMixFormat(out var mixPtr);
+        if (hr != 0 || mixPtr == IntPtr.Zero)
+            throw new InvalidOperationException($"取混音格式失败 (HRESULT {Wasapi.Describe(hr)})");
+
+        try
+        {
             var mix = Marshal.PtrToStructure<WaveFormatEx>(mixPtr);
             var isFloat = mix.IsFloat(mixPtr);
             DeviceSampleRate = (int)mix.SamplesPerSec;
@@ -139,7 +161,6 @@ public sealed class LoopbackAudioCapture : IDisposable
                 // 缓冲区必须按设备周期对齐：按上次请求取整后重试一次（MSDN 推荐做法）
                 client.GetBufferSize(out var alignFrames);
                 var alignDuration = (long)(alignFrames * TimeSpan.TicksPerSecond / mix.SamplesPerSec);
-                client = null;                       // Initialize 失败后该实例不可再用
                 device = Wasapi.GetDefaultRenderDevice();
                 client = Wasapi.ActivateAudioClient(device);
                 hr = client.Initialize(Wasapi.ShareModeShared, Wasapi.StreamFlagsLoopback,
@@ -152,18 +173,22 @@ public sealed class LoopbackAudioCapture : IDisposable
             hr = client.GetService(ref iid, out var svc);
             if (hr != 0 || svc == null)
                 throw new InvalidOperationException($"取 IAudioCaptureClient 失败 (HRESULT {Wasapi.Describe(hr)})");
-            capture = (IAudioCaptureClient)svc;
+            var capture = (IAudioCaptureClient)svc;
 
             // QPC → UTC 基准：数据包自带 QPC 采集时刻，比 DateTime.UtcNow 准得多，
-            // 音画同步全靠这个时间戳与视频帧对齐
+            // 音画同步全靠这个时间戳与视频帧对齐。重建时也必须重置基准（旧设备时钟作废）。
             _qpcBase = System.Diagnostics.Stopwatch.GetTimestamp();
             _utcBase = DateTime.UtcNow.Ticks;
             lock (_pending)
             {
-                _pending.Clear();
-                // 时间线从「现在」开始并立刻按实时推进：系统一开始没放声音时也要输出静音块，
-                // 保证 Viewer 端的音频时钟从连接起就是连续可用的
-                _pendingStartUtc = _utcBase;
+                if (_pendingStartUtc == 0)
+                {
+                    // 首次启动：时间线从「现在」开始并立刻按实时推进
+                    _pending.Clear();
+                    _pendingStartUtc = _utcBase;
+                }
+                // 设备重建：保留 _pending 与时间线原点——静音补齐保证了重建期间时间线连续推进，
+                // 这样新旧设备的数据在时间轴上无缝衔接，Viewer 端时钟不跳变
             }
 
             hr = client.Start();
@@ -174,81 +199,141 @@ public sealed class LoopbackAudioCapture : IDisposable
                 $"系统声音采集已启动: 设备 {DeviceSampleRate}Hz/{DeviceChannels}ch/{(isFloat ? "float32" : "int16")} " +
                 $"→ 输出 {AudioStreamInfo.SampleRate}Hz/{AudioStreamInfo.Channels}ch/int16，块长 {AudioStreamInfo.ChunkMs}ms");
 
-            _ready?.Set();
-            CaptureLoop(capture, _cts!.Token);
-        }
-        catch (Exception ex)
-        {
-            _initError = ex;
-            try { _ready?.Set(); } catch { }
+            return (client, capture);
         }
         finally
         {
-            if (client != null) { try { client.Stop(); } catch { } }
             if (mixPtr != IntPtr.Zero) Marshal.FreeCoTaskMem(mixPtr);
         }
     }
 
-    private void CaptureLoop(IAudioCaptureClient capture, CancellationToken ct)
+    /// <summary>
+    /// 采集主循环：读取 → 发射；设备失效（连续读取失败）时按指数退避重建采集链，
+    /// 退避与重建失败期间持续补静音块，输出流与 Viewer 端时钟始终连续。
+    /// </summary>
+    private void CaptureLoop(IAudioClient client, IAudioCaptureClient capture, CancellationToken ct)
     {
-        var chunkSamples = AudioStreamInfo.ChunkFrames * AudioStreamInfo.Channels;
-        try
+        var attempt = 0;
+        while (!ct.IsCancellationRequested)
         {
-            while (!ct.IsCancellationRequested)
+            var failures = 0;
+            try
             {
-                try
+                while (!ct.IsCancellationRequested)
                 {
-                    ReadPackets(capture);
-                }
-                catch (Exception ex)
-                {
-                    Logger.Warn("Audio", $"读取 loopback 数据包异常（继续）: {ex.Message}");
-                }
-
-                var emitted = 0;
-                lock (_pending)
-                {
-                    while (_pending.Count >= chunkSamples)
+                    try
                     {
-                        var data = new short[chunkSamples];
-                        _pending.CopyTo(0, data, 0, chunkSamples);
-                        _pending.RemoveRange(0, chunkSamples);
-                        var ts = _pendingStartUtc;
-                        _pendingStartUtc += AudioStreamInfo.ChunkTicks;
-                        var silence = IsSilent(data);
-                        if (silence) Interlocked.Increment(ref _silenceChunks);
-                        else Interlocked.Increment(ref _capturedChunks);
-                        _peakLevel = silence ? 0f : PcmConvert.RmsLevel(data);
-                        SafeEmit(new PcmChunk
-                        {
-                            Data = data,
-                            Frames = AudioStreamInfo.ChunkFrames,
-                            TimestampUtc = ts,
-                            IsSilence = silence,
-                        });
-                        emitted++;
+                        ReadPackets(capture);
+                        failures = 0;
+                    }
+                    catch (Exception ex)
+                    {
+                        failures++;
+                        // 限速：失败风暴只记首条与每 500 条一条（此前实测 3ms 一条、累计 7.5 万行）
+                        if (failures == 1 || failures % 500 == 0)
+                            Logger.Warn("Audio", $"读取 loopback 数据包异常: {ex.Message}");
+                        if (failures >= MaxConsecutiveReadFailures)
+                            throw;   // 设备已失效，交给外层重建
                     }
 
-                    // 静音补齐：流的时间线落后于墙钟就说明设备没在产包（系统静音）
-                    if (emitted == 0 && _pendingStartUtc != 0)
+                    if (EmitReadyChunks() == 0)
+                        Thread.Sleep(PollIntervalMs);
+                }
+                return; // 正常取消退出
+            }
+            catch (Exception ex)
+            {
+                attempt++;
+                var delayMs = (int)Math.Min(5000, 500 * Math.Pow(2, Math.Min(attempt - 1, 4)));
+                Logger.Warn("Audio",
+                    $"音频设备失效（{ex.Message}），{delayMs}ms 后重建采集管线（第 {attempt} 次；期间自动补静音，共享不中断）");
+
+                // 退避：持续补静音块保持时间线，恢复后音画时间戳无缝衔接
+                var deadline = Environment.TickCount64 + delayMs;
+                while (!ct.IsCancellationRequested && Environment.TickCount64 < deadline)
+                {
+                    EmitReadyChunks();
+                    Thread.Sleep(PollIntervalMs);
+                }
+
+                DisposeChain(client, capture);
+                client = null!;
+                capture = null!;
+
+                // 重建：跟随当前默认设备（用户切换/重插耳机后自动恢复真实声音）
+                while (!ct.IsCancellationRequested)
+                {
+                    try
                     {
-                        var streamEndUtc = _pendingStartUtc +
-                                           TicksForOutputFrames(_pending.Count / AudioStreamInfo.Channels);
-                        if (DateTime.UtcNow.Ticks - streamEndUtc > AudioStreamInfo.ChunkTicks)
+                        (client, capture) = InitCaptureClient();
+                        attempt = 0;
+                        break;
+                    }
+                    catch (Exception iex)
+                    {
+                        Logger.Warn("Audio", $"重建采集管线失败: {iex.Message}（继续退避重试）");
+                        var d2 = Environment.TickCount64 + 2000;
+                        while (!ct.IsCancellationRequested && Environment.TickCount64 < d2)
                         {
-                            for (var i = _pending.Count; i < chunkSamples; i++) _pending.Add(0);
+                            EmitReadyChunks();
+                            Thread.Sleep(PollIntervalMs);
                         }
                     }
                 }
-
-                if (emitted == 0) Thread.Sleep(PollIntervalMs);
             }
         }
-        catch (OperationCanceledException) { }
-        catch (Exception ex)
+    }
+
+    private static void DisposeChain(IAudioClient? client, IAudioCaptureClient? capture)
+    {
+        if (client != null) { try { client.Stop(); } catch { } }
+        if (capture != null) { try { Marshal.ReleaseComObject(capture); } catch { } }
+        if (client != null) { try { Marshal.ReleaseComObject(client); } catch { } }
+    }
+
+    /// <summary>
+    /// 从待发射队列取整块发射（含静音判定与计数）；时间线落后于墙钟时补一个静音块。
+    /// 返回本次发射的块数。
+    /// </summary>
+    private int EmitReadyChunks()
+    {
+        var emitted = 0;
+        var chunkSamples = AudioStreamInfo.ChunkFrames * AudioStreamInfo.Channels;
+        lock (_pending)
         {
-            Logger.Error("Audio", "系统声音采集线程异常退出", ex);
+            while (_pending.Count >= chunkSamples)
+            {
+                var data = new short[chunkSamples];
+                _pending.CopyTo(0, data, 0, chunkSamples);
+                _pending.RemoveRange(0, chunkSamples);
+                var ts = _pendingStartUtc;
+                _pendingStartUtc += AudioStreamInfo.ChunkTicks;
+                var silence = IsSilent(data);
+                if (silence) Interlocked.Increment(ref _silenceChunks);
+                else Interlocked.Increment(ref _capturedChunks);
+                _peakLevel = silence ? 0f : PcmConvert.RmsLevel(data);
+                SafeEmit(new PcmChunk
+                {
+                    Data = data,
+                    Frames = AudioStreamInfo.ChunkFrames,
+                    TimestampUtc = ts,
+                    IsSilence = silence,
+                });
+                emitted++;
+            }
+
+            // 静音补齐：流的时间线落后于墙钟就说明设备没在产包（系统静音/设备失效重建中）
+            if (emitted == 0 && _pendingStartUtc != 0)
+            {
+                var streamEndUtc = _pendingStartUtc +
+                                   TicksForOutputFrames(_pending.Count / AudioStreamInfo.Channels);
+                if (DateTime.UtcNow.Ticks - streamEndUtc > AudioStreamInfo.ChunkTicks)
+                {
+                    for (var i = _pending.Count; i < chunkSamples; i++) _pending.Add(0);
+                }
+            }
         }
+        return emitted;
     }
 
     /// <summary>

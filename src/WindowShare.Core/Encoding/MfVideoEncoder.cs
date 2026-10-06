@@ -15,7 +15,7 @@ namespace WindowShare.Core.Encoding;
 ///   - 支持 D3D11 纹理零拷贝输入（MFT 为 D3D11Aware 且提供了共享设备）。
 /// 选择顺序：硬件 MFT → AVC DX12 → 软件同步 MFT（按本机实际可用性自动探测）。
 /// </summary>
-public sealed class MfVideoEncoder : IDisposable
+public sealed class MfVideoEncoder : IVideoEncoder
 {
     private static readonly Guid TransformIid = new("bf94c121-5b05-4e6f-8000-ba598961414d");
     private static readonly Guid Texture2dIid = new("6F15AAF2-D208-4E89-9AB4-489535D34F9C");

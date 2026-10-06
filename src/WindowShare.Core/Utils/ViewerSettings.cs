@@ -19,6 +19,12 @@ public sealed class ViewerSettings
     public bool PlayAudio { get; set; } = true;
 
     /// <summary>
+    /// 音频抖动缓冲目标延迟（毫秒）。默认 120ms；「低延迟」档 40ms 适合有线/强信号局域网，
+    /// 代价是网络抖动大时更容易欠载重缓冲。v1.5.0 Q6。
+    /// </summary>
+    public int AudioTargetLatencyMs { get; set; } = Audio.AudioRenderer.DefaultTargetLatencyMs;
+
+    /// <summary>
     /// HEVC 解码能力（子进程探针实测后缓存；null=尚未探测，下次启动后台补测）。
     /// 探测可能触发部分平台扩展 MFT 的原生崩溃，因此永远在子进程进行并缓存结论。
     /// </summary>

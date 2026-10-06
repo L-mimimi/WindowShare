@@ -10,6 +10,7 @@
         <TextBlock x:Name="TxtDevice" FontWeight="Bold" FontSize="14" Margin="0,0,0,4"/>
         <TextBlock x:Name="TxtDeviceId" Foreground="#666" FontSize="11" Margin="0,0,0,14"/>
         <TextBlock Text="如果您不认识该设备，请选择「拒绝」。" Foreground="#E53935" FontSize="11" Margin="0,0,0,12"/>
+        <TextBlock x:Name="TxtCountdown" Foreground="#888" FontSize="11" Margin="0,0,0,12"/>
         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
             <Button Content="拒绝" Click="BtnDeny_Click" Width="90" Background="#EEE"/>
             <Button Content="仅本次允许" Click="BtnOnce_Click" Width="110"/>

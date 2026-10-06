@@ -413,6 +413,8 @@ public sealed class LanShareServer : ShareSession.IFrameSink, ShareSession.IAudi
             if (!approved)
             {
                 var info = new ViewerInfo(req.DeviceId, req.DeviceName, client.RemoteAddress);
+                Logging.Logger.Info("LanServer",
+                    $"新设备等待用户审批: {req.DeviceName} ({client.RemoteAddress})（审批弹窗限时自动拒绝；观看端将自动重连）");
                 var decision = ApproveRequired?.Invoke(info).GetAwaiter().GetResult() ?? false;
                 if (!decision)
                 {

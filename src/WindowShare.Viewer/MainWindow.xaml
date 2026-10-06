@@ -77,6 +77,10 @@
                               VerticalAlignment="Center" Margin="16,0,0,0"
                               Checked="ChkAudioPlay_Changed" Unchecked="ChkAudioPlay_Changed"
                               ToolTip="Host 端勾选了「共享系统声音」时才有声音可播。&#10;取消勾选即临时静音：此时画面不再等待音频时钟，延迟更低。"/>
+                    <CheckBox DockPanel.Dock="Left" x:Name="ChkLowLatencyAudio" Content="低延迟声音"
+                              VerticalAlignment="Center" Margin="16,0,0,0"
+                              Checked="ChkLowLatencyAudio_Changed" Unchecked="ChkLowLatencyAudio_Changed"
+                              ToolTip="音频抖动缓冲 40ms（默认 120ms）：整体音画延迟更低，适合有线/强信号局域网；&#10;网络抖动大时更易欠载重缓冲（表现为声音短暂停顿）。改动在下次连接生效。"/>
                     <TextBlock DockPanel.Dock="Left" x:Name="TxtModeHint" VerticalAlignment="Center"
                                Margin="16,0,0,0" Foreground="#888"/>
                 </DockPanel>

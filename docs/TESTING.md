@@ -161,3 +161,9 @@ powershell -ExecutionPolicy Bypass -File scripts\build.ps1 -Package
 - [ ] 双击安装（无需管理员权限），开始菜单出现 Host / Viewer 快捷方式
 - [ ] 从开始菜单启动 Host，功能与开发构建一致
 - [ ] 卸载后 `%APPDATA%\WindowShare`（白名单/设置）保留，程序目录被清理
+
+## UIA 双端连接回归（v1.5.0 起入库）
+
+`scripts\uia-regression.ps1`：全自动「Host 开共享 → Viewer CLI 直连（--connect/--password）→ 设备审批代批 →
+断言已连接/观看者 1 → 优雅断开」。README 历次声称的「双次连接 UIA 回归」自 v1.5.0 起以此脚本为准（此前为
+未入库的临时手工运行）。需要 dist\publish（build.ps1 或手动 publish）；退出码 0 = PASS。

@@ -33,10 +33,11 @@ public sealed class AudioPlaybackPipeline : IDisposable
     public long ReceivedBytes => Interlocked.Read(ref _receivedBytes);
     public long DroppedFrames => Interlocked.Read(ref _droppedFrames);
 
-    public AudioPlaybackPipeline(int sampleRate = AudioStreamInfo.SampleRate)
+    public AudioPlaybackPipeline(int sampleRate = AudioStreamInfo.SampleRate, int targetLatencyMs = AudioRenderer.DefaultTargetLatencyMs)
     {
         _decoder = new MfAacDecoder(sampleRate);
-        _renderer = new AudioRenderer(sampleRate);
+        // 抖动缓冲目标延迟：默认 120ms；设置里可选 40ms 低延迟档（v1.5.0 Q6）
+        _renderer = new AudioRenderer(sampleRate, targetLatencyMs);
         _decoder.Decoded += chunk => _renderer.Enqueue(chunk);
     }
 

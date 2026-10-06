@@ -37,6 +37,6 @@ public partial class App : Application
         Logger.Initialize(LogLevel.Info);
         Logger.Info("Viewer", "窗享 Viewer 已启动（只读观看端）");
         Logger.Info("Viewer", $"{AppPaths.ModeDescription}：{AppPaths.Root}");
-        new MainWindow().Show();
+        new MainWindow(e.Args).Show();
     }
 }

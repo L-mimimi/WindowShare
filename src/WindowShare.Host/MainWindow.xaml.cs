@@ -399,7 +399,7 @@ public partial class MainWindow : Window
                 Fps = fps,
                 BitrateBps = VideoFormatPlanner.SuggestBitrateBps(plannedWidth, plannedHeight, fps),
             };
-            if (MfVideoEncoder.ProbeAvailable(hevcProbe))
+            if (VideoEncoderFactory.ProbeAvailable(hevcProbe))
                 codec = VideoCodec.Hevc;
             else
                 Logger.Warn("Host", "本机无可用 HEVC 编码器，本次共享回退 H.264（观看端兼容性最好）");

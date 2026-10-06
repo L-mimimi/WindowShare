@@ -72,7 +72,11 @@ public partial class MainWindow : Window
     /// <summary>发现列表快照（按 Index 取回完整条目用）</summary>
     private IReadOnlyList<DiscoveredHost> _discovered = new List<DiscoveredHost>();
 
-    public MainWindow()
+    public MainWindow() : this(null) { }
+
+    /// <summary>CLI 启动参数（Q4）：--connect host[:port] / --room code / --password pwd / --port n / --signaling url；
+    /// 提供 --connect 或 --room 时窗口加载后自动连接（无人值守/自动化/回归测试用）</summary>
+    public MainWindow(string[]? cliArgs)
     {
         InitializeComponent();
         _ = ProbeHevcCapabilityAsync(); // 后台子进程探测，结果缓存进设置
@@ -90,6 +94,59 @@ public partial class MainWindow : Window
             SaveSettings();
             _discovery.Stop();
         };
+        if (cliArgs is { Length: > 0 })
+        {
+            ApplyCliArgs(cliArgs);
+            if (_autoConnect)
+                Loaded += (_, _) => BtnConnect_Click(this, new RoutedEventArgs());
+        }
+    }
+
+    private bool _autoConnect;
+
+    /// <summary>解析连接类 CLI 参数并填入界面（密码可走参数但不落盘，与其他输入一致）</summary>
+    private void ApplyCliArgs(string[] args)
+    {
+        string? host = null, port = null, room = null, pwd = null, signaling = null;
+        for (var i = 0; i < args.Length; i++)
+        {
+            string Val() => i + 1 < args.Length ? args[++i] : "";
+            switch (args[i])
+            {
+                case "--host": host = Val(); break;
+                case "--port": port = Val(); break;
+                case "--room": room = Val(); break;
+                case "--password": case "--pwd": pwd = Val(); break;
+                case "--signaling": signaling = Val(); break;
+                case "--connect":
+                    var v = Val();
+                    var idx = v.LastIndexOf(':');
+                    host = idx > 0 ? v[..idx] : v;
+                    if (idx > 0) port = v[(idx + 1)..];
+                    break;
+            }
+        }
+
+        if (room != null)
+        {
+            RbRoom.IsChecked = true;
+            TxtRoom.Text = room.ToUpperInvariant();
+        }
+        else if (host != null)
+        {
+            RbDirect.IsChecked = true;
+            TxtHost.Text = host;
+        }
+        else
+        {
+            return; // 没有连接目标：普通启动
+        }
+
+        if (port != null && int.TryParse(port, out var p) && p is >= 1 and <= 65535) TxtPort.Text = p.ToString();
+        if (pwd != null) TxtPwd.Password = pwd;
+        if (signaling != null) TxtSignaling.Text = signaling;
+        Logger.Info("Viewer", $"检测到 CLI 连接参数，窗口加载后自动连接（{(room != null ? "房间号模式" : "直连模式")}）");
+        _autoConnect = true;
     }
 
     // ===== 局域网发现（Host 开了信标就自动列出，双击直连）=====
@@ -158,6 +215,7 @@ public partial class MainWindow : Window
             TxtSignaling.Text = string.IsNullOrWhiteSpace(_settings.SignalingUrl)
                 ? "http://localhost:5000" : _settings.SignalingUrl;
             ChkAudioPlay.IsChecked = _settings.PlayAudio;
+            ChkLowLatencyAudio.IsChecked = _settings.AudioTargetLatencyMs <= 40;
             CboDecoder.SelectedIndex = _settings.DecoderPreference switch
             {
                 "mf" => 1,
@@ -176,6 +234,9 @@ public partial class MainWindow : Window
         _settings.Room = TxtRoom.Text.Trim().ToUpperInvariant();
         _settings.SignalingUrl = TxtSignaling.Text.Trim();
         _settings.PlayAudio = ChkAudioPlay.IsChecked == true;
+        _settings.AudioTargetLatencyMs = ChkLowLatencyAudio.IsChecked == true
+            ? 40
+            : WindowShare.Core.Audio.AudioRenderer.DefaultTargetLatencyMs;
         _settings.DecoderPreference = CboDecoder.SelectedIndex switch
         {
             1 => "mf",
@@ -750,7 +811,11 @@ public partial class MainWindow : Window
         if (!_presentQueue.TryAdd(frame))
         {
             // 队列满（上屏线程可能正卡在同步等待里）：丢最旧的一帧保住实时性
-            if (_presentQueue.TryTake(out _)) _presentQueue.TryAdd(frame);
+            if (_presentQueue.TryTake(out var evicted))
+            {
+                evicted.ReturnBuffer?.Invoke(); // 被挤掉的帧归还缓冲（Q3）
+                _presentQueue.TryAdd(frame);
+            }
         }
     }
 
@@ -899,7 +964,9 @@ public partial class MainWindow : Window
 
         try
         {
-            var pipeline = new AudioPlaybackPipeline(sampleRate);
+            var pipeline = new AudioPlaybackPipeline(
+                sampleRate,
+                Math.Clamp(_settings.AudioTargetLatencyMs, 20, 1000));
             pipeline.Start();
             _audio = pipeline;
             Logger.Info("Viewer",
@@ -952,6 +1019,13 @@ public partial class MainWindow : Window
         if (!_restoringSettings) SaveSettings();
         if (ChkAudioPlay.IsChecked == true) TryStartAudio();
         else StopAudio();
+    }
+
+    /// <summary>低延迟声音档（抖动缓冲 40ms）；管线在连接建立时创建，改动在下次连接生效</summary>
+    private void ChkLowLatencyAudio_Changed(object sender, RoutedEventArgs e)
+    {
+        if (!IsLoaded) return;
+        if (!_restoringSettings) SaveSettings();
     }
 
     private void UpdateAudioStatus() => Dispatcher.BeginInvoke(RefreshAudioStatus);
@@ -1016,7 +1090,7 @@ public partial class MainWindow : Window
         }
         _presentCts?.Dispose();
         _presentCts = null;
-        while (_presentQueue.TryTake(out _)) { }
+        while (_presentQueue.TryTake(out var leftover)) leftover.ReturnBuffer?.Invoke();
     }
 
     private void PresentLoop(CancellationToken ct)
@@ -1035,7 +1109,12 @@ public partial class MainWindow : Window
             {
                 // 等待期间来了更新的帧就直接跳到最新帧：屏幕共享看最新画面比看全每一帧重要，
                 // 顺带还能把积压的延迟追平
-                if (_presentQueue.TryTake(out var newer)) { frame = newer; continue; }
+                if (_presentQueue.TryTake(out var newer))
+                {
+                    frame.ReturnBuffer?.Invoke(); // 被跳过的帧不再渲染，直接归还缓冲（Q3）
+                    frame = newer;
+                    continue;
+                }
                 // 硬上限：单帧最多等 500ms——任何时钟病理（音频断流、时钟冻结）下宁可音画
                 // 短暂不同步，也不能让画面永久卡住
                 if ((System.Diagnostics.Stopwatch.GetTimestamp() - waitStart) * 1000 /
@@ -1050,7 +1129,7 @@ public partial class MainWindow : Window
         }
     }
 
-    /// <summary>BGRA → WriteableBitmap（必须在 UI 线程）</summary>
+    /// <summary>BGRA → WriteableBitmap（必须在 UI 线程）；渲染完成后归还池化缓冲（Q3）</summary>
     private void RenderFrame(DecodedVideoFrame frame)
     {
         Dispatcher.BeginInvoke(() =>
@@ -1069,6 +1148,10 @@ public partial class MainWindow : Window
             catch (Exception ex)
             {
                 Logger.Warn("Viewer", "渲染异常: " + ex.Message);
+            }
+            finally
+            {
+                frame.ReturnBuffer?.Invoke();
             }
         });
     }

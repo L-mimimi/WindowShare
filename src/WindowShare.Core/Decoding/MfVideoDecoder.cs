@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Runtime.InteropServices;
 using SharpGen.Runtime;
 using Vortice.MediaFoundation;
@@ -14,6 +15,13 @@ public sealed class DecodedVideoFrame
     public required int Height { get; init; }
     /// <summary>捕获时间戳（Host 侧生成，随帧头传输）</summary>
     public required long TimestampUtc { get; init; }
+
+    /// <summary>
+    /// 缓冲归还回调（v1.5.0 Q3）：解码器用 ArrayPool 分配 BGRA 时提供；
+    /// 消费方（Viewer 上屏）用完必须调用一次，之后缓冲回到池里复用。
+    /// null = 托管回收（冒烟测试等同步消费场景）。
+    /// </summary>
+    public Action? ReturnBuffer { get; init; }
 }
 
 /// <summary>
@@ -533,19 +541,29 @@ public sealed class MfVideoDecoder : IVideoDecoder
                 return;
             }
 
-            var nv12 = new byte[needed];
-            Marshal.Copy(ptr, nv12, 0, needed);
-            var bgra = new byte[w * h * 4];
-            Utils.Nv12ToBgra.Convert(nv12, w, h, bgra);
-
-            Interlocked.Increment(ref _decodedFrames);
-            Decoded?.Invoke(new DecodedVideoFrame
+            // nv12 是方法内局部缓冲、BGRA 交给消费方用完归还（v1.5.0 Q3：
+            // 1080p 下两者合计 ~11MB/帧的 LOH 分配，40fps 就是 450MB/s 的 GC 压力）
+            var nv12 = ArrayPool<byte>.Shared.Rent(needed);
+            try
             {
-                Bgra = bgra,
-                Width = w,
-                Height = h,
-                TimestampUtc = sample.SampleTime != 0 ? sample.SampleTime : fallbackTimestamp,
-            });
+                Marshal.Copy(ptr, nv12, 0, needed);
+                var bgra = ArrayPool<byte>.Shared.Rent(w * h * 4);
+                Utils.Nv12ToBgra.Convert(nv12, w, h, bgra);
+
+                Interlocked.Increment(ref _decodedFrames);
+                Decoded?.Invoke(new DecodedVideoFrame
+                {
+                    Bgra = bgra,
+                    Width = w,
+                    Height = h,
+                    TimestampUtc = sample.SampleTime != 0 ? sample.SampleTime : fallbackTimestamp,
+                    ReturnBuffer = () => ArrayPool<byte>.Shared.Return(bgra),
+                });
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(nv12);
+            }
         }
         finally
         {

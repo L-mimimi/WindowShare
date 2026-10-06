@@ -42,6 +42,8 @@ public sealed class TcpFrameConnection : IDisposable
     public TcpFrameConnection(TcpClient client)
     {
         _client = client;
+        // 低延迟：禁用 Nagle。音频帧仅 20ms 一发、控制帧更小，攒包会造成毫秒级延迟毛刺
+        client.NoDelay = true;
         _stream = client.GetStream();
         _stream.ReadTimeout = Timeout.Infinite;
     }

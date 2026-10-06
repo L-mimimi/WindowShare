@@ -189,7 +189,9 @@ public sealed unsafe class FfmpegVideoDecoder : IVideoDecoder
             return;
         }
 
-        var bgra = new byte[w * h * 4];
+        // BGRA 走 ArrayPool（v1.5.0 Q3）：消费方（Viewer 上屏）用完经 ReturnBuffer 归还；
+        // 不归还的调用方（冒烟测试同步消费）由 GC 兜底，仅损失复用收益
+        var bgra = System.Buffers.ArrayPool<byte>.Shared.Rent(w * h * 4);
         Yuv420pToBgra.Convert(
             yPlane, frame->linesize[0],
             uPlane, frame->linesize[1],
@@ -203,6 +205,7 @@ public sealed unsafe class FfmpegVideoDecoder : IVideoDecoder
             Width = w,
             Height = h,
             TimestampUtc = timestampUtc,
+            ReturnBuffer = () => System.Buffers.ArrayPool<byte>.Shared.Return(bgra),
         });
     }
 
