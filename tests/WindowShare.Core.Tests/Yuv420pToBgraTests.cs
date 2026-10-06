@@ -76,4 +76,66 @@ public class Yuv420pToBgraTests
             Assert.Equal(254, bgra[i * 4 + 0]);
         }
     }
+
+    /// <summary>
+    /// NV12 宏块填充裁剪（v1.5.2 审计 A5）：1080 的流被硬件解码器报成 1088 时，
+    /// 底部 8 行是填充，不该进画面。关键点是 **UV 平面偏移按缓冲高度 height 计算**，
+    /// 只裁剪写入行数——若实现改成按可见高度定位 UV 平面，色度就会被整段错位读取。
+    /// </summary>
+    [Fact]
+    public void Nv12_VisibleRows_CropsBottomPaddingAndKeepsChromaAligned()
+    {
+        const int width = 4;
+        const int bufferHeight = 8;   // 宏块对齐后的缓冲高度（如 1088）
+        const int visibleRows = 4;    // 真实画面高度（如 1080）
+        var nv12 = new byte[width * bufferHeight * 3 / 2];
+        // 前 4 行白（Y=235）、后 4 行黑（Y=16）
+        for (var row = 0; row < bufferHeight; row++)
+            for (var col = 0; col < width; col++)
+                nv12[row * width + col] = row < visibleRows ? (byte)235 : (byte)16;
+        // UV 平面（从中性色度起）全部填 128
+        for (var i = width * bufferHeight; i < nv12.Length; i++) nv12[i] = 128;
+
+        var bgra = new byte[width * visibleRows * 4];
+        Nv12ToBgra.Convert(nv12, width, bufferHeight, bgra, visibleRows);
+
+        for (var i = 0; i < width * visibleRows; i++)
+        {
+            Assert.Equal(254, bgra[i * 4 + 2]); // R：白
+            Assert.Equal(254, bgra[i * 4 + 1]);
+            Assert.Equal(254, bgra[i * 4 + 0]);
+        }
+    }
+
+    /// <summary>不传 visibleRows 时行为与旧实现一致（整幅转换）</summary>
+    [Fact]
+    public void Nv12_WithoutVisibleRows_ConvertsWholeFrame()
+    {
+        const int width = 4, height = 4;
+        var nv12 = new byte[width * height * 3 / 2];
+        Array.Fill(nv12, (byte)128);
+        for (var i = 0; i < width * height; i++) nv12[i] = 235; // Y 白
+        for (var i = width * height; i < nv12.Length; i++) nv12[i] = 128;
+        var bgra = new byte[width * height * 4];
+
+        Nv12ToBgra.Convert(nv12, width, height, bgra);
+
+        for (var i = 0; i < width * height; i++)
+            Assert.Equal(254, bgra[i * 4 + 2]);
+    }
+
+    /// <summary>BGRA 缓冲按可见行数分配时不应抛异常，且越界请求必须被拒</summary>
+    [Fact]
+    public void Nv12_VisibleRows_RequiresOnlyVisibleSizeBuffer()
+    {
+        const int width = 8, height = 8;
+        var nv12 = new byte[width * height * 3 / 2];
+        var bgra = new byte[width * 4 * 4];   // 只够 4 行
+
+        // 可见 4 行 → 够用
+        Nv12ToBgra.Convert(nv12, width, height, bgra, 4);
+
+        // 可见 8 行 → 缓冲不足，必须报错而不是越界写
+        Assert.Throws<ArgumentException>(() => Nv12ToBgra.Convert(nv12, width, height, bgra, 8));
+    }
 }
