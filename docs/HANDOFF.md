@@ -7,8 +7,8 @@
 
 ## 0. 先看这三件事
 
-1. **所有改动都还没提交。** HEAD 仍是 `c661833 fix: v1.5.2 上屏策略改「视频自由上屏」…`，
-   23 个修改文件 + 3 个新增文件全在**工作区**。接手第一件事应该是**审阅并提交**（见 §4）。
+1. **改动已提交（4 个提交，工作区干净）。** 见 §4 的提交清单。**尚未推送**到 `origin`，
+   是否推送／是否发版由你决定。
 2. **P0 批次已闭环并验证**：单测 215/215、冒烟 11/11、4 项实机复测通过。**唯一例外是 A6**（见 §3.1）。
 3. **P1 安全批次一行没动**（S1–S9）。其中 S1–S3 只在**信令服务器暴露到公网**时是 CRITICAL/HIGH；
    纯局域网自用风险低。见 §3.4。
@@ -19,7 +19,7 @@
 
 | 项 | 值 |
 |---|---|
-| 分支 / HEAD | `main` @ `c661833`（未提交改动见 §4） |
+| 分支 / HEAD | `main` @ `fdcd054`（工作区干净；4 个提交未推送） |
 | .NET SDK | **8.0.425**（`C:\Program Files\dotnet\sdk`），满足 `global.json` 的 `8.0.100 / latestMinor` |
 | 平台 | Windows、RTX 5060、1920×1080@165Hz |
 | 显示相关运行时 | `Microsoft.NETCore.App` / `Microsoft.WindowsDesktop.App` |
@@ -102,25 +102,23 @@ dotnet run --project tools/WindowShare.SmokeTest -c Release   # 11/11 PASS
 
 ---
 
-## 4. 交接第一件事：提交
+## 4. 已提交内容（工作区干净）
 
-未提交清单（`git status`）：
+已按批次拆成 **4 个提交**（未推送；提交信息里带完整动机与实测数据）：
 
-- **修改 23 个**：`README.md`、`docs/{PROTOCOL,ROADMAP,TESTING}.md`、
-  `Core/{Audio/AudioPlaybackPipeline,Audio/AudioRenderer,Capture/GraphicsCaptureEngine,Capture/ICaptureEngine,Decoding/MfVideoDecoder,Encoding/EncoderPipeline,Network/AuthPayloads,Network/CongestionController,Network/LanShareServer,Network/TcpFrameConnection,Session/ShareSession,Utils/Nv12ToBgra}.cs`、
-  `Host/{MainWindow.xaml.cs,TrayIcon.cs}`、`Viewer/MainWindow.xaml.cs`、
-  `tests/.../{CongestionControllerTests,Yuv420pToBgraTests}.cs`、`tools/WindowShare.SmokeTest/Program.cs`
-- **新增 3 个**：`docs/AUDIT-v1.5.2.md`、`docs/DEVLOG.md`、`tests/WindowShare.Core.Tests/TcpFrameConnectionTests.cs`
+| 提交 | 主题 | 规模 |
+|------|------|------|
+| `c196927` | `docs: v1.5.2 试运行审计 + 交接/工作日志 + 文档一致性修正` | 7 文件 +1443/−20 |
+| `88b620a` | `fix: v1.5.2 P0 批次——托盘/拥塞恢复/码率上报/1088 填充/连接释放/启动设置覆盖` | 13 文件 +302/−72 |
+| `cd469ef` | `perf: WGC 捕获侧帧率节流——消除 78% 白做的帧（累计分配 ↓89%）` | 3 文件 +56/−9 |
+| `fdcd054` | `test: 新增连接生命周期、NV12 裁剪与拥塞恢复回归（207 → 215）` | 3 文件 +258 |
 
-**建议**：按批次拆提交，便于日后回溯与回滚。
+提交后复核：`dotnet build` 0 错误、`dotnet test` **215/215**、`git status` 干净。
 
-1. `docs: v1.5.2 试运行审计 + 工作日志 + 文档一致性修正`（docs 三个 + README）
-2. `fix: P0 批次——托盘 hWnd / 拥塞可恢复 / 码率假上报 / 1088 填充 / 连接释放 / 启动设置覆盖（215 单测 + 11 冒烟）`
-3. `perf: WGC 捕获侧帧率节流——消除 78% 白做的帧（累计分配 ↓89%）`
-4. （可选，按需）`test: 新增连接生命周期与 NV12 裁剪/拥塞恢复回归`
+**版本号**：`Directory.Build.props` 仍是 `1.5.2`（未动）。按原计划 P0 全通过才升 **1.5.3** ——
+现在 P0 已闭环（除 A6 复测），可以现在升，或等 A6 验完再升。**这是需要你决定的**。
 
-**版本号**：`Directory.Build.props` 仍是 `1.5.2`。按原计划 P0 全通过才升 **1.5.3** ——
-现在 P0 已闭环（除 A6 复测），可以随提交一起升，或等 A6 验完再升。**这是需要你决定的**。
+**推送**：4 个提交都还在本地。`git push` 前建议确认是否要一并升版本号，避免推送后再补。
 
 ---
 
@@ -142,9 +140,8 @@ dotnet run --project tools/WindowShare.SmokeTest -c Release   # 11/11 PASS
 
 ## 6. 建议的明天顺序
 
-1. 审阅并**按 §4 拆提交**（先保住今天的工作）。
+1. ~~审阅并拆提交~~ **已完成**（§4，4 个提交，工作区干净）→ 改为：**决定是否 `git push` 与是否升版本号**。
 2. 跑一遍 §1 的三条命令确认基线（5 分钟）。
 3. **A6 长会话复测**（10 分钟，唯一"改了没验完"的）。
 4. **查 §3.2 的 24fps→21fps 缺口**（Host 实际捕获 fps vs 编码 fps 并排采样）。
-5. 决定版本号是否升 1.5.3。
-6. 开 P1 批次：先 S1+S2（信令鉴权），单独立 `docs/PROPOSAL-v1.6.0.md` 更合适——它们需要独立设计，不适合塞进补丁版。
+5. 开 P1 批次：先 S1+S2（信令鉴权），单独立 `docs/PROPOSAL-v1.6.0.md` 更合适——它们需要独立设计，不适合塞进补丁版。
