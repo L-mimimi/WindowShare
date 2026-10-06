@@ -6,21 +6,28 @@ Windows 只读屏幕/窗口共享软件：**Host 端**捕获整个屏幕或指�
 
 ## 下载（Windows x64）
 
-最新版本 **v1.5.0** ｜ [全部发布版本](https://github.com/L-mimimi/WindowShare/releases)
+最新版本 **v1.5.1** ｜ [全部发布版本](https://github.com/L-mimimi/WindowShare/releases)
 
 | 类型 | 文件 | 大小 | 说明 |
 |------|------|------|------|
-| 安装版 | [WindowShare-Setup-1.5.0.exe](https://github.com/L-mimimi/WindowShare/releases/download/v1.5.0/WindowShare-Setup-1.5.0.exe) | 110.1 MB | Inno Setup per-user 安装，**无需管理员权限**；数据写入 `%APPDATA%\WindowShare` |
-| 便携版 | [WindowShare-Portable-1.5.0.zip](https://github.com/L-mimimi/WindowShare/releases/download/v1.5.0/WindowShare-Portable-1.5.0.zip) | 153.6 MB | 解压即用，可放 U 盘；数据全部存于程序目录 `data\` |
+| 安装版 | [WindowShare-Setup-1.5.1.exe](https://github.com/L-mimimi/WindowShare/releases/download/v1.5.1/WindowShare-Setup-1.5.1.exe) | 110.1 MB | Inno Setup per-user 安装，**无需管理员权限**；数据写入 `%APPDATA%\WindowShare` |
+| 便携版 | [WindowShare-Portable-1.5.1.zip](https://github.com/L-mimimi/WindowShare/releases/download/v1.5.1/WindowShare-Portable-1.5.1.zip) | 153.6 MB | 解压即用，可放 U 盘；数据全部存于程序目录 `data\` |
 
 两者均为 self-contained（win-x64），目标机器**无需预装 .NET 运行时**。系统要求：Windows 10 1903（10.0.18362）或更高。
 
 校验（SHA256）：
 
 ```
-7a642f9903615dcaadba97ab0bc3ecad731859e79533c7b9c9c0e130cc83f76f  WindowShare-Setup-1.5.0.exe
-aba208bf4ee3b59895c4cbcf28edc472c7a5260fcfd53b7083f51b0432c14646  WindowShare-Portable-1.5.0.zip
+fb553aafe251f2d1504b8c559a89f986a51109151ad25781e89ac84e38967883  WindowShare-Setup-1.5.1.exe
+a1e0a73dc76e691ac72f4c6dab4cf9e6d340af2ca7b14492b257f9d8b758bcdd  WindowShare-Portable-1.5.1.zip
 ```
+
+## 1.5.1 更新
+
+- **修复观看画面卡顿（重要）**：音画同步的等待逻辑在「抖动缓冲深度 > 提前量」时把每一帧都跳掉——解码 21fps 只剩 7fps 上屏（实测跳帧 142 次/10s、最大间隔 565ms），而码率/帧率计数一切正常，极具迷惑性。修复：上屏改为**只跳过已迟到的帧，未到点的帧各等各的时隙**；等待硬上限 500ms → 120ms。实测恢复 21fps 1:1 呈现、跳帧 0、间隔 ≤143ms。新增「上屏节奏」周期诊断日志（帧数/最大间隔/跳帧/积压），此类问题今后一眼可辨。
+- **自适应音频抖动缓冲**：低延迟档（40ms）遇突发到达会慢性耗尽（实测 35 秒 87 次欠载，音频时钟反复冻结拖住画面）。现在欠载时按 40ms 步进自动加深缓冲（上限 +200ms），连续 30 秒健康后逐步回落到用户设定值——低延迟与流畅不再互斥。
+- 修复设备审批弹窗按钮被裁剪不可见（v1.5.0 新增倒计时行后固定高度不够）：窗口改为按内容自适应高度。
+- 单测 207 项、冒烟 11 项全 PASS，UIA 双端连接回归 PASS。
 
 ## 1.5.0 更新
 

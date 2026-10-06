@@ -1,7 +1,8 @@
 <Window x:Class="WindowShare.Host.ApprovalDialog"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="观看者请求接入" Width="420" Height="220"
+        Title="观看者请求接入" Width="420" SizeToContent="Height"
+        MaxHeight="360"
         WindowStartupLocation="CenterScreen" Topmost="True"
         ResizeMode="NoResize" ShowInTaskbar="False">
     <StackPanel Margin="16">

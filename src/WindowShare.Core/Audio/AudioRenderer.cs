@@ -51,6 +51,14 @@ public sealed class AudioRenderer : IDisposable
     private float[] _floatScratch = new float[0];
     private short[] _intScratch = new short[0];
 
+    // 自适应抖动缓冲（v1.5.1）：慢性欠载说明「到达间隔 > 当前缓冲」，按 40ms 步进自动加深（上限 +200ms），
+    // 连续 30s 健康后按 20ms 步进回落到用户设定值。低延迟档（40ms）遇到突发到达不再反复耗尽。
+    private long _adaptiveExtraFrames;
+    private long _lastUnderrunTicks;
+
+    private int EffectiveTargetFrames =>
+        _targetLatencyFrames + (int)Interlocked.Read(ref _adaptiveExtraFrames);
+
     public AudioRenderer(int sourceSampleRate = AudioStreamInfo.SampleRate,
                          int targetLatencyMs = DefaultTargetLatencyMs)
     {
@@ -301,7 +309,7 @@ public sealed class AudioRenderer : IDisposable
                 {
                     int queued;
                     lock (_gate) queued = _queuedFrames;
-                    if (queued < _targetLatencyFrames) { Thread.Sleep(3); continue; }
+                    if (queued < EffectiveTargetFrames) { Thread.Sleep(3); continue; }
 
                     if (!_deviceStarted)
                     {
@@ -330,8 +338,16 @@ public sealed class AudioRenderer : IDisposable
                     {
                         _inUnderrun = true;
                         Interlocked.Increment(ref _underruns);
+                        _lastUnderrunTicks = Environment.TickCount64;
+                        // 自适应加深：步进 40ms，上限 +200ms（v1.5.1）
+                        var extra = Interlocked.Read(ref _adaptiveExtraFrames);
+                        var step = _sourceSampleRate * 40 / 1000;
+                        var cap = _sourceSampleRate * 200 / 1000;
+                        if (extra < cap)
+                            Interlocked.Exchange(ref _adaptiveExtraFrames, Math.Min(extra + step, cap));
                         Logger.Warn("Audio",
-                            $"音频缓冲耗尽（第 {Underruns} 次），重新蓄水 {_targetLatencyFrames * 1000 / _sourceSampleRate}ms");
+                            $"音频缓冲耗尽（第 {Underruns} 次），重新蓄水 {EffectiveTargetFrames * 1000 / _sourceSampleRate}ms" +
+                            $"（自适应缓冲 +{Interlocked.Read(ref _adaptiveExtraFrames) * 1000 / _sourceSampleRate}ms）");
                     }
                     lock (_gate) _rebuffering = true;
                     Thread.Sleep(3);
@@ -340,6 +356,16 @@ public sealed class AudioRenderer : IDisposable
                 _inUnderrun = false;
 
                 if (!WriteFrames(Math.Min(available, queuedNow))) Thread.Sleep(3);
+                else
+                {
+                    // 健康回落：连续 30s 无欠载就逐步回落到用户设定的目标缓冲（步进 20ms）
+                    var extra = Interlocked.Read(ref _adaptiveExtraFrames);
+                    if (extra > 0 && Environment.TickCount64 - _lastUnderrunTicks > 30_000)
+                    {
+                        var step = _sourceSampleRate * 20 / 1000;
+                        Interlocked.Exchange(ref _adaptiveExtraFrames, Math.Max(0, extra - step));
+                    }
+                }
             }
         }
         catch (OperationCanceledException) { }

@@ -104,6 +104,12 @@ public partial class MainWindow : Window
 
     private bool _autoConnect;
 
+    // 上屏节奏诊断计数（PresentLoop 写，UpdateStatsBar 读后清零）
+    private long _presentCount;
+    private long _maxPresentGapMs;
+    private long _skippedCount;
+    private int _statsBarTicks;
+
     /// <summary>解析连接类 CLI 参数并填入界面（密码可走参数但不落盘，与其他输入一致）</summary>
     private void ApplyCliArgs(string[] args)
     {
@@ -893,6 +899,20 @@ public partial class MainWindow : Window
         TxtFps.Text = $"帧率：{fps:F1} fps";
         if (!double.IsNaN(_lastRttMs))
             TxtLatency.Text = $"延迟：≈{_lastRttMs / 2:F0} ms（网络单向）";
+
+        // 上屏节奏诊断：每 10 秒一条（含最大上屏间隔与跳帧数）。均值正常但最大间隔大 = 卡顿实锤，
+        // 配合解码/等待计数可区分「解码跟不上」与「音频时钟等待」（v1.5.1 排查）
+        _statsBarTicks++;
+        if (_statsBarTicks % 10 == 0 && _isConnected)
+        {
+            var presents = Interlocked.Exchange(ref _presentCount, 0);
+            var maxGap = Interlocked.Exchange(ref _maxPresentGapMs, 0);
+            var skipped = Interlocked.Exchange(ref _skippedCount, 0);
+            if (presents > 0)
+                Logger.Info("Viewer",
+                    $"上屏节奏[10s]: {presents} 帧（均值 {presents / 10.0:F1}fps）, 最大间隔 {maxGap}ms, " +
+                    $"跳帧 {skipped}, 队列积压 {_presentQueue.Count}, 解码 {_decoder?.DecodedFrames ?? 0}");
+        }
         RefreshAudioStatus();
     }
 
@@ -1095,36 +1115,69 @@ public partial class MainWindow : Window
 
     private void PresentLoop(CancellationToken ct)
     {
+        // 上屏节奏诊断（v1.5.1 排查用）：记录帧间隔分布，UpdateStatsBar 周期汇总到日志。
+        // 帧率均值正常但画面卡顿 = 间隔分布差（忽快忽慢），这组数字能直接区分
+        // 「解码跟不上」/「音频时钟等待」/「上屏线程被饿」三类成因。
+        // 计数直接用字段（Interlocked）：UpdateStatsBar 在 UI 线程读取并清零。
+        long lastPresentTicks = 0;
+        DecodedVideoFrame? pending = null;
         while (!ct.IsCancellationRequested)
         {
             DecodedVideoFrame frame;
-            try { frame = _presentQueue.Take(ct); }
+            try
+            {
+                frame = pending ?? _presentQueue.Take(ct);
+                pending = null;
+            }
             catch (OperationCanceledException) { break; }
             catch (InvalidOperationException) { break; }
 
             var clock = _audio?.Clock;
+
+            // 追平积压：只跳过「已迟到」的帧（时钟已越过其上屏点），停在最新的已到点帧上。
+            // 未到点的帧绝不跳过——它们各有各的时隙。v1.5.0 的旧逻辑在等待期无条件跳到
+            // 最新帧，而抖动缓冲深度（120-160ms）> 提前量（40ms）时每一帧都在等待期被
+            // 下一帧顶掉：解码 21fps 只剩 7fps 上屏，画面肉眼卡顿而码率/帧率计数一切正常。
+            while (!ct.IsCancellationRequested && _presentQueue.TryTake(out var newer))
+            {
+                if (AvSyncClock.Decide(newer.TimestampUtc, clock?.GetAudioUtcTicks()) == VideoPresentDecision.Present)
+                {
+                    frame.ReturnBuffer?.Invoke(); // 迟到的旧帧直接归还缓冲（Q3）
+                    Interlocked.Increment(ref _skippedCount);
+                    frame = newer;
+                }
+                else
+                {
+                    pending = newer; // 还没到点：留给下一轮按它自己的时隙上屏
+                    break;
+                }
+            }
+
+            // 等当前帧的时隙；硬上限 120ms——音频时钟病理（反复短暂冻结）时不把视频拖成幻灯片，
+            // 宁可短暂音画不同步，音频恢复后自动重新对齐
             var waitStart = System.Diagnostics.Stopwatch.GetTimestamp();
             while (clock != null && !ct.IsCancellationRequested &&
                    AvSyncClock.Decide(frame.TimestampUtc, clock.GetAudioUtcTicks()) == VideoPresentDecision.Wait)
             {
-                // 等待期间来了更新的帧就直接跳到最新帧：屏幕共享看最新画面比看全每一帧重要，
-                // 顺带还能把积压的延迟追平
-                if (_presentQueue.TryTake(out var newer))
-                {
-                    frame.ReturnBuffer?.Invoke(); // 被跳过的帧不再渲染，直接归还缓冲（Q3）
-                    frame = newer;
-                    continue;
-                }
-                // 硬上限：单帧最多等 500ms——任何时钟病理（音频断流、时钟冻结）下宁可音画
-                // 短暂不同步，也不能让画面永久卡住
                 if ((System.Diagnostics.Stopwatch.GetTimestamp() - waitStart) * 1000 /
-                    System.Diagnostics.Stopwatch.Frequency > 500)
+                    System.Diagnostics.Stopwatch.Frequency > 120)
                 {
                     break;
                 }
                 Thread.Sleep(2);
             }
             if (ct.IsCancellationRequested) break;
+
+            var now = System.Diagnostics.Stopwatch.GetTimestamp();
+            if (lastPresentTicks != 0)
+            {
+                var gapMs = (now - lastPresentTicks) * 1000 / System.Diagnostics.Stopwatch.Frequency;
+                var cur = Interlocked.Read(ref _maxPresentGapMs);
+                if (gapMs > cur) Interlocked.Exchange(ref _maxPresentGapMs, gapMs);
+            }
+            lastPresentTicks = now;
+            Interlocked.Increment(ref _presentCount);
+
             RenderFrame(frame);
         }
     }
