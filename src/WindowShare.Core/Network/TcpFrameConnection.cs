@@ -23,6 +23,8 @@ public sealed class TcpFrameConnection : IDisposable
 
     public bool IsConnected => _client.Connected && !_closed;
     private volatile bool _closed;
+    /// <summary>已释放标志（0/1，Interlocked）：与协议关闭标志 <see cref="_closed"/> 分离，见 Dispose</summary>
+    private int _disposed;
 
     /// <summary>
     /// 是否把 24 字节帧头作为 AAD 绑定进加密（1.3.0 起经认证握手协商；
@@ -62,6 +64,7 @@ public sealed class TcpFrameConnection : IDisposable
     public async Task SendAsync(MessageType type, FrameFlags flags, ReadOnlyMemory<byte> payload,
         CancellationToken ct = default)
     {
+        if (Volatile.Read(ref _disposed) != 0) return;   // 已释放：静默丢弃，避免 ObjectDisposedException
         await _sendLock.WaitAsync(ct);
         try
         {
@@ -87,6 +90,7 @@ public sealed class TcpFrameConnection : IDisposable
     /// </summary>
     public void Send(MessageType type, FrameFlags flags, long timestampUtc, ReadOnlySpan<byte> payload)
     {
+        if (Volatile.Read(ref _disposed) != 0) return;   // 已释放：静默丢弃
         _sendLock.Wait();
         try
         {
@@ -275,12 +279,18 @@ public sealed class TcpFrameConnection : IDisposable
 
     public void Dispose()
     {
-        if (_closed) return;
+        // 幂等用独立标志：绝不能拿 _closed 当"已释放"的门闩。
+        // 读循环的 finally 在**任何**退出原因（对端关闭、协议违例、解密失败、取消）下都会置
+        // _closed，而"对端断开"是最常见的路径 —— 用它做门闩会让 Dispose 直接 return，
+        // 于是 NetworkStream/TcpClient/socket 句柄、SemaphoreSlim、_readCts 与 AesGcmSession
+        // 全都只等 GC 终结器释放（v1.5.2 审计 S6）。
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+
         _closed = true;
-        _readCts?.Cancel();
-        _sendLock.Dispose();
+        try { _readCts?.Cancel(); } catch { }
+        try { _sendLock.Dispose(); } catch { }
         try { _stream.Dispose(); } catch { }
         try { _client.Dispose(); } catch { }
-        (_encryption as IDisposable)?.Dispose();
+        try { (_encryption as IDisposable)?.Dispose(); } catch { }
     }
 }

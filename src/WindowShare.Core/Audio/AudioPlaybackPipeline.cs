@@ -27,6 +27,10 @@ public sealed class AudioPlaybackPipeline : IDisposable
     public string DecoderName => _decoder.DecoderName;
     public bool IsPlaying => _renderer.IsPlaying;
     public int BufferedMs => _renderer.BufferedMs;
+    /// <summary>当前生效的抖动缓冲目标（用户设定值 + 自适应加深量，毫秒）</summary>
+    public int EffectiveTargetMs => _renderer.EffectiveTargetMs;
+    /// <summary>自适应额外加深量（毫秒；0 = 回落到用户设定值）</summary>
+    public int AdaptiveExtraMs => _renderer.AdaptiveExtraMs;
     public long Underruns => _renderer.Underruns;
     public float Level => _renderer.Level;
     public long ReceivedFrames => Interlocked.Read(ref _receivedFrames);

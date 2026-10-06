@@ -21,6 +21,9 @@ public sealed class CongestionController
     // 丢帧率阈值
     private const double DegradeDropRatio = 0.10;
 
+    /// <summary>每档回升所需的"持续良好"时长（秒）——每升一档都要重新计满</summary>
+    internal const int RecoverHoldSeconds = 15;
+
     private static readonly int[] BitrateSteps = { 100, 60, 35, 20 }; // 百分比
     private const int MaxResolutionStep = 2;                          // 分辨率阶梯档位 0..2
 
@@ -133,26 +136,37 @@ public sealed class CongestionController
                 return new ControlDecision(target, newW, newH, "拥塞降档");
             }
 
-            if (healthy && _bitrateStep > 0)
+            // 恢复：需要持续良好 RecoverHoldSeconds 秒才允许回升**一档**。
+            // 每成功回升一档都要刷新 _lastGoodSince —— 否则"持续良好 15 秒才升一档"只对第一档成立，
+            // 之后每次评估（2s）都会再升一档，从最低档约 10s 冲回满档并再次拥塞（振荡）。
+            if (healthy && (_bitrateStep > 0 || _resolutionStep > 0))
             {
-                // 需要持续良好 15 秒才回升
-                if ((now - _lastGoodSince).TotalSeconds < 15)
+                if ((now - _lastGoodSince).TotalSeconds < RecoverHoldSeconds)
                     return new ControlDecision(null, null, null, "观察恢复中");
                 _consecutiveDegrades = 0;
-                _bitrateStep--;
-                if (_bitrateStep == 0 && _resolutionStep > 0)
+
+                if (_bitrateStep > 0)
                 {
-                    _resolutionStep--;
-                    var scale = ResolutionScale(_resolutionStep);
-                    var w = _initialWidth * scale / 100 & ~1;
-                    var h = _initialHeight * scale / 100 & ~1;
-                    var target2 = _initialBitrateBps * BitrateSteps[_bitrateStep] / 100;
-                    Logging.Logger.Info("Congestion", $"网络恢复 → 码率 {target2 / 1000}kbps, 分辨率 {w}x{h}");
-                    return new ControlDecision(target2, w, h, "恢复升档");
+                    _bitrateStep--;
+                    _lastGoodSince = now;   // 本档已经行动过，下一档再等一个观察窗口
+                    var target = _initialBitrateBps * BitrateSteps[_bitrateStep] / 100;
+                    Logger.Info("Congestion",
+                        $"网络恢复 → 码率 {target / 1000}kbps（档位 {_bitrateStep}/{BitrateSteps.Length - 1}）");
+                    return new ControlDecision(target, null, null, "恢复升档");
                 }
-                var target3 = _initialBitrateBps * BitrateSteps[_bitrateStep] / 100;
-                Logging.Logger.Info("Congestion", $"网络恢复 → 码率 {target3 / 1000}kbps");
-                return new ControlDecision(target3, null, null, "恢复升档");
+
+                // 码率已在满档、分辨率仍在降档档位 → 单独立回升分辨率。
+                // 历史上这一步嵌在 `_bitrateStep > 0` 分支内，导致到达
+                // `_bitrateStep == 0 && _resolutionStep > 0` 这一自然中间态后永远回不去
+                // （本会话分辨率被永久钉在 66%/45%，v1.5.2 审计 A3）。
+                _resolutionStep--;
+                _lastGoodSince = now;
+                var scale = ResolutionScale(_resolutionStep);
+                var w = _initialWidth * scale / 100 & ~1;
+                var h = _initialHeight * scale / 100 & ~1;
+                var target2 = _initialBitrateBps * BitrateSteps[_bitrateStep] / 100;
+                Logger.Info("Congestion", $"网络恢复 → 分辨率 {w}x{h}（档位 {_resolutionStep}/{MaxResolutionStep}）");
+                return new ControlDecision(target2, w, h, "恢复分辨率");
             }
 
             if (healthy)

@@ -735,6 +735,40 @@ public static class Program
     return pass;
     }
     /// <summary>
+    /// 定位信令服务器 dll。按序尝试：仓库源码树的 Release/Debug 产物、`dist\publish\signaling`、
+    /// 以及冒烟 exe 旁的 `signaling\`。返回 null 表示四处都没有。
+    /// </summary>
+    private static string? FindSignalingDll()
+    {
+        const string name = "WindowShare.Signaling.dll";
+        var candidates = new List<string>();
+
+        // 1) 从输出目录向上找仓库根（含 WindowShare.sln），再拼源码树与 dist 路径
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        for (var i = 0; i < 10 && dir != null; i++, dir = dir.Parent)
+        {
+            if (!File.Exists(Path.Combine(dir.FullName, "WindowShare.sln"))) continue;
+            foreach (var config in new[] { "Release", "Debug" })
+            {
+                candidates.Add(Path.Combine(dir.FullName, "src", "WindowShare.Signaling",
+                    "bin", config, "net8.0", name));
+            }
+            candidates.Add(Path.Combine(dir.FullName, "dist", "publish", "signaling", name));
+            break;
+        }
+
+        // 2) 冒烟 exe 所在目录旁的 signaling\（手动把 dist\publish 叠加过来时的布局）
+        candidates.Add(Path.Combine(AppContext.BaseDirectory, "signaling", name));
+
+        foreach (var c in candidates)
+        {
+            if (File.Exists(c)) return c;
+        }
+        foreach (var c in candidates) Logger.Debug("Part5", $"信令候选不存在: {c}");
+        return null;
+    }
+
+    /// <summary>
     /// 信令回环测试：启动信令服务器子进程 → Host 注册房间 → Viewer 加入（密码验证+审批）
     /// → Viewer 收到 Host LAN 端点。含错误密码负向用例。
     /// </summary>
@@ -744,15 +778,19 @@ public static class Program
         const int port = 48001;
         var baseUrl = $"http://127.0.0.1:{port}";
 
-        // 启动信令服务器子进程（复用已构建产物）
-        var dll = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..",
-            "..", "src", "WindowShare.Signaling", "bin", "Debug", "net8.0", "WindowShare.Signaling.dll");
-        dll = Path.GetFullPath(dll);
-        if (!File.Exists(dll))
+        // 启动信令服务器子进程。产物位置随运行方式而变，按序兜底：
+        //   源码树 Release/Debug（dotnet run / IDE 场景）
+        //   dist\publish\signaling（对发布产物运行冒烟：仓库根\dist\publish\signaling）
+        //   AppContext.BaseDirectory\signaling（冒烟 exe 旁随发布一起带的 signaling 子目录）
+        // 历史缺陷：只认 Debug 源码树路径，导致对 dist 部署产物跑冒烟时 Part5 必然 FAIL。
+        var dll = FindSignalingDll();
+        if (dll == null)
         {
-            Logger.Error("Part5", $"信令服务器未构建: {dll}");
+            Logger.Error("Part5", "未找到信令服务器产物（已尝试：源码树 bin\\Release|Debug、" +
+                                 "dist\\publish\\signaling、输出目录旁的 signaling\\）");
             return false;
         }
+        Logger.Info("Part5", $"信令服务器产物: {dll}");
         // 定位能承载 ASP.NET Core 的 dotnet（apphost 场景 MainModule 不是 dotnet.exe）
         var dotnet = System.Diagnostics.Process.GetCurrentProcess().MainModule?.FileName ?? "dotnet";
         if (!Path.GetFileName(dotnet).Equals("dotnet.exe", StringComparison.OrdinalIgnoreCase))

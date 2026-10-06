@@ -73,6 +73,14 @@ public partial class MainWindow : Window
 
     public MainWindow()
     {
+        // 构造期间禁止写设置：InitializeSources/CboResolution.ItemsSource 等会设置 SelectedIndex，
+        // 从而触发 SelectionChanged → SaveSettings()，而此时多数控件还是 XAML 默认值。
+        // 后果是"已保存的用户设置被启动瞬间的控件默认值覆盖"（实测：MinimizeToTray true→false、
+        // Discoveryable true→false、ResolutionIndex 2→0），与 1.3.1 的「构造期写设置」
+        // 是同一类缺陷——当时只修了崩溃（控件为 null），没有修数据覆盖。
+        // ApplySettings 内部自带 try/finally，会把它置回 false，因此这里先把整段构造护住，
+        // 构造结束时再统一放行（见方法末尾的 _uiReady = true）。
+        _restoringSettings = true;
         InitializeComponent();
         InitializeSources();
         CboResolution.ItemsSource = ResolutionPresets.Select(r => r.Name).ToList();
@@ -90,7 +98,8 @@ public partial class MainWindow : Window
             _infoTimer.Stop();
             Logger.LogEmitted -= OnLogEmitted;
         };
-        _uiReady = true;   // XAML 加载完毕，之后控件事件才允许写设置
+        _restoringSettings = false;   // 构造完成，控件事件恢复写设置
+        _uiReady = true;              // XAML 加载完毕，之后控件事件才允许写设置
     }
 
     /// <summary>窗口句柄就绪后挂托盘图标；菜单动作统一回 UI 线程</summary>

@@ -80,6 +80,10 @@ public sealed class AudioRenderer : IDisposable
     }
     /// <summary>缓冲耗尽次数</summary>
     public long Underruns => Interlocked.Read(ref _underruns);
+    /// <summary>当前生效的抖动缓冲目标（毫秒：用户设定值 + 自适应加深量）</summary>
+    public int EffectiveTargetMs => (int)((long)EffectiveTargetFrames * 1000 / Math.Max(1, _sourceSampleRate));
+    /// <summary>自适应额外加深量（毫秒；0 = 回落到用户设定值）</summary>
+    public int AdaptiveExtraMs => (int)(Interlocked.Read(ref _adaptiveExtraFrames) * 1000 / Math.Max(1, _sourceSampleRate));
     /// <summary>最近一块的 RMS 电平（0..1，UI 显示音量）</summary>
     public float Level => _level;
 
@@ -173,11 +177,17 @@ public sealed class AudioRenderer : IDisposable
         {
             _queue.Enqueue(render);
             _queuedFrames += frames;
-            // 缓冲超上限：丢最旧的，保住实时性（宁可少听一段，也不能越拖越后）
+            // 缓冲超上限：丢最旧的，保住实时性（宁可少听一段，也不能越拖越后）。
+            // 注意：队首块可能已被部分写进设备（Offset > 0），此时它只占 Frames - Offset 帧，
+            // 必须按剩余量扣减——按整块 Frames 扣会永久少算，把 _queuedFrames 推到负值，
+            // 进而在队列仍有数据时误判"缓冲耗尽"并让自适应缓冲无谓加深（v1.5.2 审计 A6）。
             while (_queuedFrames > _maxBufferFrames && _queue.Count > 1)
             {
                 var dropped = _queue.Dequeue();
-                _queuedFrames -= dropped.Frames;
+                var remaining = dropped.Frames - dropped.Offset;
+                _queuedFrames -= remaining;
+                Logger.Debug("Audio",
+                    $"抖动缓冲超上限，丢弃最旧块（{remaining} 帧，Offset={dropped.Offset}），当前 {_queuedFrames} 帧");
             }
         }
     }
@@ -364,6 +374,9 @@ public sealed class AudioRenderer : IDisposable
                     {
                         var step = _sourceSampleRate * 20 / 1000;
                         Interlocked.Exchange(ref _adaptiveExtraFrames, Math.Max(0, extra - step));
+                        // 回落也要留痕：先前只有加深打 Warn，导致"目标是否被遵守"在现网无法验证
+                        Logger.Info("Audio",
+                            $"抖动缓冲健康回落 → 目标 {EffectiveTargetMs}ms（自适应额外 {AdaptiveExtraMs}ms）");
                     }
                 }
             }

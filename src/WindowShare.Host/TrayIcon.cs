@@ -2,6 +2,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows;
 using System.Windows.Interop;
+using WindowShare.Core.Logging;
 using static WindowShare.Host.NativeTray;
 
 namespace WindowShare.Host;
@@ -41,7 +42,13 @@ public sealed class TrayIcon : IDisposable
         nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
         nid.hIcon = _iconSmall;
         nid.szTip = _tip;
-        Shell_NotifyIcon(NIM_ADD, ref nid);
+        if (!Shell_NotifyIcon(NIM_ADD, ref nid))
+        {
+            // hWnd 必须指向一个真实窗口，否则 shell 无法投递 uCallbackMessage（WM_TRAY），
+            // 右键菜单与单击将永远不触发 —— 这里失败必须可见，而不是静默无托盘。
+            Logger.Warn("Tray", $"创建托盘图标失败（Win32 错误 {Marshal.GetLastWin32Error()}，hwnd=0x{_hwnd:X}）");
+            return;
+        }
         _added = true;
     }
 
@@ -55,7 +62,8 @@ public sealed class TrayIcon : IDisposable
         nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
         nid.hIcon = _iconSmall;
         nid.szTip = tip;
-        Shell_NotifyIcon(NIM_MODIFY, ref nid);
+        if (!Shell_NotifyIcon(NIM_MODIFY, ref nid))
+            Logger.Warn("Tray", $"更新托盘提示失败（Win32 错误 {Marshal.GetLastWin32Error()}）");
     }
 
     /// <summary>气泡提示（首图说明「关闭≠停止共享」）</summary>
@@ -66,13 +74,18 @@ public sealed class TrayIcon : IDisposable
         nid.uFlags = NIF_INFO;
         nid.szInfoTitle = title;
         nid.szInfo = text;
-        Shell_NotifyIcon(NIM_MODIFY, ref nid);
+        if (!Shell_NotifyIcon(NIM_MODIFY, ref nid))
+            Logger.Warn("Tray", $"显示托盘气泡失败（Win32 错误 {Marshal.GetLastWin32Error()}）");
     }
 
-    private static NOTIFYICONDATA NewNotifyIcon() => new()
+    /// <summary>
+    /// 构造 NOTIFYICONDATA。必须带上宿主窗口句柄：shell 靠 hWnd + uCallbackMessage 投递鼠标
+    /// 消息，hWnd 为 0 时托盘图标即使显示出来也收不到任何点击（历史缺陷：菜单完全不可达）。
+    /// </summary>
+    private NOTIFYICONDATA NewNotifyIcon() => new()
     {
         cbSize = (uint)Marshal.SizeOf<NOTIFYICONDATA>(),
-        hWnd = 0, uID = 0x5753, uCallbackMessage = WM_TRAY,
+        hWnd = _hwnd, uID = 0x5753, uCallbackMessage = WM_TRAY,
         szTip = "", szInfo = "", szInfoTitle = "",
     };
 
@@ -160,7 +173,8 @@ public sealed class TrayIcon : IDisposable
         if (_added)
         {
             var nid = NewNotifyIcon();
-            Shell_NotifyIcon(NIM_DELETE, ref nid);
+            if (!Shell_NotifyIcon(NIM_DELETE, ref nid))
+                Logger.Warn("Tray", $"移除托盘图标失败（Win32 错误 {Marshal.GetLastWin32Error()}）");
             _added = false;
         }
         if (_iconSmall != IntPtr.Zero) DestroyIcon(_iconSmall);

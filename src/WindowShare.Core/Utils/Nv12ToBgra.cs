@@ -17,14 +17,20 @@ public static unsafe class Nv12ToBgra
 
     /// <summary>
     /// 转换 NV12（stride=width）到 BGRA（stride=width*4）。
-    /// nv12 长度需 ≥ width*height*3/2；bgra 长度需 ≥ width*height*4。
+    /// nv12 长度需 ≥ width*height*3/2；bgra 长度需 ≥ width*visibleRows*4。
+    ///
+    /// <paramref name="visibleRows"/> 小于 <paramref name="height"/> 时只写前若干行（宏块填充裁剪）：
+    /// 超过 visibleRows 的行**不再写入**，同时读取也停在最后一行所需的范围——调用方可以用
+    /// 按 visibleRows 分配的 BGRA 缓冲接住，而不必为填充行买单。
     /// </summary>
-    public static void Convert(ReadOnlySpan<byte> nv12, int width, int height, Span<byte> bgra)
+    public static void Convert(ReadOnlySpan<byte> nv12, int width, int height, Span<byte> bgra,
+        int? visibleRows = null)
     {
+        var rows = Math.Clamp(visibleRows ?? height, 1, height);
         if (nv12.Length < width * height * 3 / 2)
             throw new ArgumentException($"NV12 缓冲不足: {nv12.Length} < {width * height * 3 / 2}");
-        if (bgra.Length < width * height * 4)
-            throw new ArgumentException($"BGRA 缓冲不足: {bgra.Length}");
+        if (bgra.Length < width * rows * 4)
+            throw new ArgumentException($"BGRA 缓冲不足: {bgra.Length} < {width * rows * 4}");
 
         fixed (byte* pNv = nv12)
         fixed (byte* pOut = bgra)
@@ -34,7 +40,7 @@ public static unsafe class Nv12ToBgra
             var pUvPlane = pNv + (long)width * height;
             var uvStride = width / 2;
 
-            for (var row = 0; row < height; row++)
+            for (var row = 0; row < rows; row++)
             {
                 var pYRow = pYPlane + (long)row * width;
                 var pUvRow = pUvPlane + (long)(row / 2) * width; // UV 交错行
@@ -59,10 +65,12 @@ public static unsafe class Nv12ToBgra
     }
 
     /// <summary>转换并直接写入 WriteableBitmap 后备缓冲（IntPtr 版本，避免额外拷贝）</summary>
-    public static void ConvertToPointer(ReadOnlySpan<byte> nv12, int width, int height, IntPtr bgraTarget)
+    public static void ConvertToPointer(ReadOnlySpan<byte> nv12, int width, int height, IntPtr bgraTarget,
+        int? visibleRows = null)
     {
         if (bgraTarget == IntPtr.Zero) throw new ArgumentNullException(nameof(bgraTarget));
+        var rows = Math.Clamp(visibleRows ?? height, 1, height);
         Convert(nv12, width, height,
-            new Span<byte>((void*)bgraTarget, width * height * 4));
+            new Span<byte>((void*)bgraTarget, width * rows * 4), rows);
     }
 }

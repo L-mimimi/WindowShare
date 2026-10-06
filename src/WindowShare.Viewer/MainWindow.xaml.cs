@@ -36,6 +36,9 @@ public partial class MainWindow : Window
     /// <summary>Host 侧画质参数（StatsInfo 周期携带；0=未知，如旧版 Host 或 WebRTC 路径）</summary>
     private int _hostTargetBitrateBps;
     private bool _hostDowngraded;
+    /// <summary>Host 上报的编码输出真实尺寸（0=未知/老版本 Host）；仅 UI 线程读写</summary>
+    private int _hostOutputWidth;
+    private int _hostOutputHeight;
     /// <summary>当前解码器对应的编码（Host 协商为 HEVC 时自动换解码器）</summary>
     private VideoCodec _decoderCodec = VideoCodec.H264;
     /// <summary>HEVC 解码能力（子进程探针实测；null=探测中/未知 → 按 H.264 观看端接入）</summary>
@@ -659,6 +662,10 @@ public partial class MainWindow : Window
             TxtEncoder.Text = $"编码器：{s.EncoderName}{(s.Hardware ? "(硬)" : "(软)")} · 源:{s.SourceTitle}";
             _hostTargetBitrateBps = s.TargetBitrateBps;
             _hostDowngraded = s.Downgraded;
+            // 编码输出真实尺寸：解码器报的是宏块对齐尺寸（1080→1088），只有编码侧知道真实值。
+            // 放在 UI 线程赋值，保证与 RenderFrame（同样在 UI 线程）读写同一个字段。
+            _hostOutputWidth = s.OutputWidth;
+            _hostOutputHeight = s.OutputHeight;
         });
     }
 
@@ -701,6 +708,8 @@ public partial class MainWindow : Window
         _connectedAtUtc = null;
         _hostTargetBitrateBps = 0;
         _hostDowngraded = false;
+        _hostOutputWidth = 0;    // 换会话即失效，避免用上一会话的尺寸裁剪新画面
+        _hostOutputHeight = 0;
         _decoderCodec = VideoCodec.H264;
     }
 
@@ -1082,10 +1091,11 @@ public partial class MainWindow : Window
                         (audio.Underruns > 0 ? $" 卡顿{audio.Underruns}" : "");
         TxtAudio.ToolTip =
             $"解码器：{audio.DecoderName}\n" +
-            $"抖动缓冲目标：{AudioRenderer.DefaultTargetLatencyMs}ms（当前 {audio.BufferedMs}ms）\n" +
+            $"抖动缓冲目标：{audio.EffectiveTargetMs}ms（当前 {audio.BufferedMs}ms" +
+            (audio.AdaptiveExtraMs > 0 ? $"，自适应加深 {audio.AdaptiveExtraMs}ms" : "") + "）\n" +
             $"已收 {audio.ReceivedFrames} 帧 / {audio.ReceivedBytes / 1024} KB，解码失败 {audio.DroppedFrames}\n" +
             $"缓冲耗尽 {audio.Underruns} 次\n" +
-            "视频以音频播放时钟为主时钟对齐上屏；取消勾选「播放系统声音」则画面不再等待，延迟更低";
+            "视频解码一帧上屏一帧（流畅优先）；仅在滞后音频时钟超过 500ms 时丢弃积压帧";
     }
 
     /// <summary>
@@ -1183,13 +1193,17 @@ public partial class MainWindow : Window
         {
             try
             {
-                if (_bitmap == null || _bitmap.PixelWidth != frame.Width || _bitmap.PixelHeight != frame.Height)
+                // 解码器的输出高度可能被对齐到宏块边界（1080 → 1088），底部是填充行。
+                // Host 通过 StatsInfo 上报编码输出真实尺寸，据此裁掉填充并如实显示分辨率；
+                // 校验失败（老版本 Host / 尺寸异常）时按解码尺寸整幅渲染，行为与旧版一致。
+                var (vw, vh) = VisibleSize(frame);
+                if (_bitmap == null || _bitmap.PixelWidth != vw || _bitmap.PixelHeight != vh)
                 {
-                    _bitmap = new WriteableBitmap(frame.Width, frame.Height, 96, 96, PixelFormats.Bgra32, null);
+                    _bitmap = new WriteableBitmap(vw, vh, 96, 96, PixelFormats.Bgra32, null);
                     VideoImage.Source = _bitmap;
-                    TxtResolution.Text = $"分辨率：{frame.Width}×{frame.Height}";
+                    TxtResolution.Text = $"分辨率：{vw}×{vh}";
                 }
-                _bitmap.WritePixels(new System.Windows.Int32Rect(0, 0, frame.Width, frame.Height),
+                _bitmap.WritePixels(new System.Windows.Int32Rect(0, 0, vw, vh),
                     frame.Bgra, frame.Width * 4, 0);
             }
             catch (Exception ex)
@@ -1201,6 +1215,24 @@ public partial class MainWindow : Window
                 frame.ReturnBuffer?.Invoke();
             }
         });
+    }
+
+    /// <summary>
+    /// 取这一帧真正要显示的区域。解码 BGRA 按 <see cref="DecodedVideoFrame.Width"/> 行距排布，
+    /// 因此裁剪只改行数（width 不变），不需要重排像素。
+    /// 只在「Host 上报的尺寸确实小于解码尺寸、且差值属于宏块对齐量（≤32 行）」时裁剪，
+    /// 避免把真实的分辨率变化误裁掉。
+    /// </summary>
+    private (int Width, int Height) VisibleSize(DecodedVideoFrame frame)
+    {
+        var dw = _hostOutputWidth;
+        var dh = _hostOutputHeight;
+        var aligned = dh > 0 && dw > 0
+                      && dw == frame.Width
+                      && dh < frame.Height
+                      && frame.Height - dh <= 32
+                      && dh % 2 == 0;
+        return aligned ? (dw, dh) : (frame.Width, frame.Height);
     }
 
     private void Window_Closing(object sender, System.ComponentModel.CancelEventArgs e)

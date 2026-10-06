@@ -98,6 +98,16 @@ public sealed record StatsInfoPayload
     [JsonPropertyName("fps")] public int Fps { get; init; }
     /// <summary>Host 是否处于拥塞降档状态（true 时状态栏提示「已降档」）</summary>
     [JsonPropertyName("dg")] public bool Downgraded { get; init; }
+
+    // ===== 编码输出真实尺寸（v1.5.3 起；用于观看端裁剪宏块填充并如实显示分辨率）=====
+    /// <summary>
+    /// Host 编码输出的真实宽度（0=未知/老版本）。
+    /// 解码器（如 MF H.264）会把输出缓冲的高度对齐到宏块边界（1080 → 1088）并在该尺寸下报告
+    /// `MF_MT_FRAME_SIZE`，因此**只有编码侧知道自己真正的输出尺寸**。观看端据此裁剪底部填充行。
+    /// </summary>
+    [JsonPropertyName("w")] public int OutputWidth { get; init; }
+    /// <summary>Host 编码输出的真实高度（0=未知/老版本）</summary>
+    [JsonPropertyName("h")] public int OutputHeight { get; init; }
 }
 
 /// <summary>认证载荷的 JSON 序列化辅助</summary>

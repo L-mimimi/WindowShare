@@ -626,6 +626,9 @@ public sealed class LanShareServer : ShareSession.IFrameSink, ShareSession.IAudi
                         TargetBitrateBps = _controller.CurrentBitrateBps,
                         Fps = _session.Options?.Fps ?? 0,
                         Downgraded = _controller.IsDowngraded,
+                        // 编码输出真实尺寸：观看端据此裁剪解码器的宏块填充行并如实显示分辨率
+                        OutputWidth = _session.OutputSize.Width,
+                        OutputHeight = _session.OutputSize.Height,
                     });
                     client.Connection.Send(MessageType.StatsInfo, FrameFlags.None, stats);
                 }

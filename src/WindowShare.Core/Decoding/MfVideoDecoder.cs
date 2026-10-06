@@ -62,6 +62,8 @@ public sealed class MfVideoDecoder : IVideoDecoder
     private bool _eosSent;
     private bool _outputTypeSet;
     private int _droppedUnknownSize;
+    /// <summary>真实画面高度（≤ OutputHeight；差值部分是宏块填充，不上屏）</summary>
+    private int _renderHeight;
     private long _inputFrames;
     private long _outputSamples;
     private int _droppedShortBuffer;
@@ -482,11 +484,26 @@ public sealed class MfVideoDecoder : IVideoDecoder
         // 当前输出类型读不到分辨率时，退回刚才那份类型上的 FrameSize
         if (!TryReadOutputSize() && typeSize != 0)
         {
-            OutputWidth = (int)(typeSize >> 32);
-            OutputHeight = (int)(typeSize & 0xFFFFFFFF);
-            if (OutputWidth > 0)
-                Logging.Logger.Info("Decoder", $"解码输出分辨率: {OutputWidth}x{OutputHeight}");
+            var w = (int)(typeSize >> 32);
+            var h = (int)(typeSize & 0xFFFFFFFF);
+            if (w > 0) SetDecodedSize(w, h);
         }
+    }
+
+    /// <summary>
+    /// 记录解码输出尺寸。`OutputHeight` 是**输出类型声明的缓冲高度**（宏块对齐，1080 → 1088），
+    /// `_renderHeight` 是**真实画面高度**（MFT 在输出类型上自报的 FRAME_SIZE，通常等于编码时的高度）。
+    ///
+    /// 两者必须分开：整帧拷贝按缓冲高度做，BGRA 转换只做真实画面的行数。历史实现把两者当成同一个值，
+    /// 于是 1080 的流被按 1088 行转换并上屏 —— 底部 8 行宏块填充进入画面（v1.5.2 审计 A5），
+    /// 且在缓冲实际只有 1080 行时属于**越过有效数据读取**。
+    /// </summary>
+    private void SetDecodedSize(int width, int height)
+    {
+        OutputWidth = width;
+        OutputHeight = height;
+        _renderHeight = height;
+        Logging.Logger.Info("Decoder", $"解码输出分辨率: {width}x{height}");
     }
 
     /// <summary>从「当前输出类型」读取分辨率（不重设类型）；读到有效值返回 true</summary>
@@ -501,12 +518,7 @@ public sealed class MfVideoDecoder : IVideoDecoder
             var w = (int)(size >> 32);
             var h = (int)(size & 0xFFFFFFFF);
             if (w <= 0 || h <= 0) return false;
-            if (w != OutputWidth || h != OutputHeight)
-            {
-                OutputWidth = w;
-                OutputHeight = h;
-                Logging.Logger.Info("Decoder", $"解码输出分辨率: {w}x{h}");
-            }
+            if (w != OutputWidth || h != OutputHeight) SetDecodedSize(w, h);
             return true;
         }
         catch { return false; }
@@ -531,14 +543,39 @@ public sealed class MfVideoDecoder : IVideoDecoder
                 return;
             }
             var w = OutputWidth;
-            var h = OutputHeight;
+            var h = OutputHeight;              // 缓冲高度（宏块对齐，1080 → 1088）
+            var visible = _renderHeight;       // 真实画面高度（通常 1080）
+            if (visible <= 0 || visible > h)
+            {
+                // MFT 自报的画面比输出类型声明的缓冲高：不可信，按缓冲高度渲染。
+                //（按较小的值渲染是安全的——缓冲至少有 h 行；反之会越界读。）
+                visible = h;
+                _renderHeight = h;
+            }
+
             var needed = w * h * 3 / 2;
             if (length < needed)
             {
-                // 数据不完整，丢弃（首次记一条，便于定位输出缓冲分配过小）
-                if (Interlocked.Increment(ref _droppedShortBuffer) == 1)
-                    Logging.Logger.Warn("Decoder", $"输出缓冲不足：{length} < {needed}（{w}x{h} NV12），丢弃该帧");
-                return;
+                // 缓冲比"输出类型声明的尺寸"小（少见）：这种情况只可能是声明的尺寸偏大，
+                // 按缓冲反推可渲染的行数，避免整帧丢弃导致观看端黑屏。
+                var rowsFromBuffer = (int)((long)length * 2 / 3 / w);
+                if (rowsFromBuffer >= 2 && rowsFromBuffer < h)
+                {
+                    if (Interlocked.Increment(ref _droppedShortBuffer) == 1)
+                        Logging.Logger.Warn("Decoder",
+                            $"输出缓冲小于声明尺寸：{length} < {needed}（{w}x{h} NV12），" +
+                            $"按 {w}x{rowsFromBuffer} 渲染");
+                    h = rowsFromBuffer;
+                    visible = Math.Min(visible, h);
+                    needed = w * h * 3 / 2;
+                }
+                else
+                {
+                    // 数据不完整，丢弃（首次记一条，便于定位输出缓冲分配过小）
+                    if (Interlocked.Increment(ref _droppedShortBuffer) == 1)
+                        Logging.Logger.Warn("Decoder", $"输出缓冲不足：{length} < {needed}（{w}x{h} NV12），丢弃该帧");
+                    return;
+                }
             }
 
             // nv12 是方法内局部缓冲、BGRA 交给消费方用完归还（v1.5.0 Q3：
@@ -547,15 +584,17 @@ public sealed class MfVideoDecoder : IVideoDecoder
             try
             {
                 Marshal.Copy(ptr, nv12, 0, needed);
-                var bgra = ArrayPool<byte>.Shared.Rent(w * h * 4);
-                Utils.Nv12ToBgra.Convert(nv12, w, h, bgra);
+                // 只转换并交付真实画面的行数：底部 (h - visible) 行是宏块填充，不该进画面
+                //（BGRA 只按 visible 行分配；UV 平面偏移仍按 h 计算，见 Nv12ToBgra.Convert）
+                var bgra = ArrayPool<byte>.Shared.Rent(w * visible * 4);
+                Utils.Nv12ToBgra.Convert(nv12, w, h, bgra, visible);
 
                 Interlocked.Increment(ref _decodedFrames);
                 Decoded?.Invoke(new DecodedVideoFrame
                 {
                     Bgra = bgra,
                     Width = w,
-                    Height = h,
+                    Height = visible,
                     TimestampUtc = sample.SampleTime != 0 ? sample.SampleTime : fallbackTimestamp,
                     ReturnBuffer = () => ArrayPool<byte>.Shared.Return(bgra),
                 });

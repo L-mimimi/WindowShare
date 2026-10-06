@@ -23,6 +23,9 @@ public sealed class EncoderPipeline : IDisposable
     private int _outHeight;     // 当前编码输出高
     private int _dynamicMaxW;   // 拥塞控制允许的最大输出宽（动态分辨率上限）
     private int _dynamicMaxH;   // 拥塞控制允许的最大输出高
+    /// <summary>会话初始配置尺寸（不随动态降档改写），用于夹取"恢复分辨率"请求</summary>
+    private readonly int _configWidth;
+    private readonly int _configHeight;
     private ID3D11Texture2D? _uploadTexture;   // CPU BGRA → GPU 上传纹理（复用）
     private int _uploadWidth, _uploadHeight;
     private long _encodedFrames;
@@ -60,10 +63,19 @@ public sealed class EncoderPipeline : IDisposable
     /// <summary>因帧率节流被丢弃的帧数（诊断用）</summary>
     public long DroppedFrames => Interlocked.Read(ref _droppedFrames);
 
+    /// <summary>
+    /// 是否由本管线做帧率节流。默认 true（调用方直接喂帧的场景，如冒烟 Part2b 的定速投喂）。
+    /// 会话在捕获引擎自身实现 <see cref="Capture.IFrameRateLimited"/> 时置为 false ——
+    /// 让"谁节流"只有一处权威，避免两层独立节流各自带相位与容差互相抢帧
+    /// （实测两层串联会把 24fps 目标压到 19.5fps）。启动会话后不再变更。
+    /// </summary>
+    public bool FrameThrottleEnabled { get; set; } = true;
+
     public EncoderPipeline(EncoderSettings settings)
     {
         Settings = settings;
         (_outWidth, _outHeight) = EvenSize(settings.Width, settings.Height);
+        (_configWidth, _configHeight) = EvenSize(settings.Width, settings.Height);
         _dynamicMaxW = _outWidth;
         _dynamicMaxH = _outHeight;
         _frameIntervalQpc = System.Diagnostics.Stopwatch.Frequency / Math.Max(1, settings.Fps);
@@ -102,9 +114,13 @@ public sealed class EncoderPipeline : IDisposable
         {
             try
             {
-                // 帧率节流：早于目标帧间隔到达的帧直接丢弃（finally 仍会释放帧）
+                // 帧率节流（兜底）：早于目标帧间隔到达的帧直接丢弃（finally 仍会释放帧）。
+                // 仅当**捕获引擎自身不做节流**时才启用（见 FrameThrottleEnabled）：两层独立节流各自有
+                // 相位与容差，串在一起会互相抢帧——实测把 24fps 目标压到 19.5fps。
+                // 保留本层是因为有调用方**直接喂管线**（冒烟 Part2b 的定速投喂，以及将来不实现
+                // IFrameRateLimited 的引擎），此时没有上游节流，必须由管线负责。
                 var nowQpc = System.Diagnostics.Stopwatch.GetTimestamp();
-                if (_lastAcceptedQpc != 0 &&
+                if (FrameThrottleEnabled && _lastAcceptedQpc != 0 &&
                     nowQpc - _lastAcceptedQpc < _frameIntervalQpc - _frameIntervalQpc / 8)
                 {
                     Interlocked.Increment(ref _droppedFrames);
@@ -150,12 +166,28 @@ public sealed class EncoderPipeline : IDisposable
         }
     }
 
-    /// <summary>动态码率：调整编码器目标码率</summary>
+    /// <summary>
+    /// 动态码率：调整编码器目标码率。
+    ///
+    /// 编码器拒绝时**不改写 Settings.BitrateBps**：该字段是"本会话实际使用的码率"的唯一出处
+    /// ——它经 AuthResult.TargetBitrateBps 与周期 StatsInfo 上报给观看端，也用于编码器重建
+    /// （分辨率切换）时恢复正确档位。若在设置失败时仍改写它，UI 会显示一个编码器并不遵守的
+    /// 目标值（v1.5.2 审计 A4：FFmpeg 厂商硬编路径上 SetBitrate 恒返回 false）。
+    /// </summary>
     public bool SetBitrate(int bitrateBps)
     {
-        Settings = Settings with { BitrateBps = bitrateBps };
         var ok = _encoder.SetBitrate(bitrateBps);
-        Logger.Info("Pipeline", $"动态码率 → {bitrateBps / 1000} kbps ({(ok ? "已生效" : "设置失败")})");
+        if (ok)
+        {
+            Settings = Settings with { BitrateBps = bitrateBps };
+            Logger.Info("Pipeline", $"动态码率 → {bitrateBps / 1000} kbps（已生效）");
+        }
+        else
+        {
+            Logger.Warn("Pipeline",
+                $"动态码率请求 {bitrateBps / 1000} kbps 未被编码器接受，保持 " +
+                $"{Settings.BitrateBps / 1000} kbps（本机编码器不支持动态重配；拥塞时仍会降分辨率）");
+        }
         return ok;
     }
 
@@ -182,16 +214,20 @@ public sealed class EncoderPipeline : IDisposable
     /// <summary>
     /// 动态分辨率：更新编码输出尺寸上限（等比缩放由 VideoProcessor 完成）。
     /// 实际输出 = min(上限, 源尺寸)，因此恢复时传回原始尺寸即可。
+    ///
+    /// 夹取基准必须是**会话初始配置尺寸**（`_configWidth/_configHeight`），而不是 `Settings.Width`：
+    /// 后者会在 `UpdateOutputSize` 里被改写成降档后的尺寸，用它夹取会让"恢复到原始分辨率"的请求
+    /// 被夹回当前降档值并因相等而提前返回 —— 分辨率在本会话内永久回不去（v1.5.2 审计 A3）。
     /// </summary>
     public void SetDynamicResolution(int width, int height)
     {
         lock (_gate)
         {
-            var (w, h) = EvenSize(Math.Min(width, Settings.Width), Math.Min(height, Settings.Height));
+            var (w, h) = EvenSize(Math.Min(width, _configWidth), Math.Min(height, _configHeight));
             if (w == _dynamicMaxW && h == _dynamicMaxH) return;
             _dynamicMaxW = w;
             _dynamicMaxH = h;
-            Logger.Info("Pipeline", $"动态分辨率上限 → {w}x{h}");
+            Logger.Info("Pipeline", $"动态分辨率上限 → {w}x{h}（会话原始 {_configWidth}x{_configHeight}）");
         }
     }
 
