@@ -72,13 +72,15 @@ public interface ICaptureEngine : IDisposable
 }
 
 /// <summary>
-/// 可选能力：引擎自带帧率节流（轮询式引擎实现，如 GDI 兜底引擎）。
-/// 会话启动前把目标帧率下发给引擎；不实现此接口的引擎（WGC / DXGI 按系统更新事件推送）
-/// 由编码管线统一节流，见 EncoderPipeline。
+/// 可选能力：引擎自带帧率节流（把目标帧率下发给引擎，超出的帧在引擎内部就丢弃）。
+/// 实现者：<see cref="GdiCaptureEngine"/>（定速轮询）与 <see cref="GraphicsCaptureEngine"/>（WGC）。
+/// WGC 与 DXGI 由系统更新事件驱动，动画内容下推送频率远高于目标帧率（实测 1080p 约 105fps vs 24fps），
+/// 捕获侧先节流可以避免为将被丢弃的帧做纹理复制与托管分配；编码管线仍保留一层节流作为兜底
+/// （见 <see cref="Encoding.EncoderPipeline"/>）。
 /// </summary>
 public interface IFrameRateLimited
 {
-    /// <summary>目标捕获帧率（1..240）</summary>
+    /// <summary>目标捕获帧率（1..240；0 或负值 = 不节流）</summary>
     int TargetFps { get; set; }
 }
 

@@ -12,7 +12,7 @@ namespace WindowShare.Core.Capture;
 ///   - GPU 纹理零拷贝输出，编码器可直接消费；
 ///   - 尝试去掉系统黄色边框（IsBorderRequired，Win11/Server 2022+）。
 /// </summary>
-public sealed class GraphicsCaptureEngine : ICaptureEngine
+public sealed class GraphicsCaptureEngine : ICaptureEngine, IFrameRateLimited
 {
     public string Name => "Windows Graphics Capture";
     public bool IsGpuTexture => true;
@@ -37,6 +37,36 @@ public sealed class GraphicsCaptureEngine : ICaptureEngine
     private readonly Queue<ID3D11Texture2D> _texturePool = new();
     /// <summary>池上限：捕获→编码→归还的在途窗口通常 ≤2 帧，3 个留余量</summary>
     private const int MaxPooledTextures = 3;
+
+    /// <summary>目标帧率（0/负 = 不节流，按 WGC 推送节奏全收；由共享会话按用户档位下发）</summary>
+    private int _targetFps;
+    /// <summary>帧间隔（QPC 单位）；与 <see cref="_targetFps"/> 同步维护</summary>
+    private long _frameIntervalQpc;
+    /// <summary>上一个被接受的帧的 QPC 时刻（0 = 尚未接受过）</summary>
+    private long _lastAcceptedQpc;
+
+    public int TargetFps
+    {
+        get => _targetFps;
+        set
+        {
+            _targetFps = value;
+            _frameIntervalQpc = value > 0 ? System.Diagnostics.Stopwatch.Frequency / value : 0;
+        }
+    }
+
+    /// <summary>
+    /// 是否接受本帧。容忍 1/8 个间隔的抖动（与 <see cref="Encoding.EncoderPipeline"/> 的节流口径一致），
+    /// 避免"略早于间隔"的帧被反复丢掉导致实际帧率低于目标。
+    /// </summary>
+    private bool ShouldAcceptFrame()
+    {
+        if (_frameIntervalQpc <= 0) return true;
+        var now = System.Diagnostics.Stopwatch.GetTimestamp();
+        if (_lastAcceptedQpc != 0 && now - _lastAcceptedQpc < _frameIntervalQpc - _frameIntervalQpc / 8)
+            return false;
+        return true;
+    }
 
     /// <summary>系统是否支持 WGC</summary>
     public static bool IsAvailable()
@@ -138,10 +168,20 @@ public sealed class GraphicsCaptureEngine : ICaptureEngine
         var item = _item;
         var pool = _pool;
         if (item == null || pool == null) return;
+
+        // 捕获侧帧率节流（消费方只要求 TargetFps）：屏幕内容动画时 WGC 按合成节奏推送，
+        // 实测 1080p 下约 105fps，而编码只取 24fps。被丢弃的 78% 帧此前会走完
+        // TryGetNextFrame → GetTextureFromSurface → CopyResource 全流程（每帧约 79KB 托管分配），
+        // 既白耗 GPU/CPU，也把 GC 回收压力抬高数倍（v1.5.2 审计 A1 的放大因素）。
+        // 注意必须仍然调用 TryGetNextFrame：FramePool 的缓冲要由调用方释放，
+        // 不看帧也必须把帧取出来 Dispose，否则池不再推送新帧（画面会停）。
+        using var frame = sender.TryGetNextFrame();
+        if (frame == null) return;
+        if (!ShouldAcceptFrame()) return;   // 取到了但不要：仅释放池缓冲，不做后续昂贵工作
+        _lastAcceptedQpc = System.Diagnostics.Stopwatch.GetTimestamp();
+
         try
         {
-            using var frame = sender.TryGetNextFrame();
-            if (frame == null) return;
 
             // 帧内容尺寸可能变化（窗口/显示器分辨率改变）→ 重建 FramePool
             var size = frame.ContentSize;

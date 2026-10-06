@@ -198,7 +198,9 @@ public sealed class ShareSession : IDisposable
             var (engine, note) = CaptureEngineFactory.Create(source, options.CaptureEngine);
             if (!string.IsNullOrEmpty(note))
                 Logger.Warn("Session", note);
-            // 轮询式引擎（GDI）自身按目标帧率节流；推送式引擎（WGC/DXGI）由编码管线统一节流
+            // 帧率节流只留一处权威：捕获引擎支持就交给它（在廉价的帧回调处丢弃，避免为将被丢弃的帧
+            // 做纹理复制与托管分配）；否则由编码管线负责。两层同时开各自带相位与容差，会互相抢帧。
+            var engineThrottles = engine is IFrameRateLimited;
             if (engine is IFrameRateLimited rateLimited)
                 rateLimited.TargetFps = options.Fps;
 
@@ -220,7 +222,10 @@ public sealed class ShareSession : IDisposable
                 Fps = fps,
                 BitrateBps = options.BitrateBps,
                 GopSize = Math.Max(2, fps * 2), // 2 秒一个关键帧
-            });
+            })
+            {
+                FrameThrottleEnabled = !engineThrottles,
+            };
 
             var recordFile = options.RecordForValidation ? options.RecordFilePath : null;
             if (recordFile != null)
