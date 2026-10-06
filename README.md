@@ -141,7 +141,7 @@ dotnet run --project src\WindowShare.Signaling --urls http://0.0.0.0:5000
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\build.ps1 -Package
-# 产出：installer\output\WindowShare-Setup-1.2.0.exe
+# 产出：installer\output\WindowShare-Setup-<版本>.exe（如 WindowShare-Setup-1.5.2.exe）
 ```
 
 需要 Inno Setup 6/7（`winget install JRSoftware.InnoSetup`）；未安装时脚本会自动通过
@@ -151,7 +151,7 @@ NuGet 包 `Tools.InnoSetup` 获取编译器，无需手工安装。安装包为 
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\build.ps1 -Portable
-# 产出：dist\portable\WindowShare-Portable-1.2.0.zip（含目录版）
+# 产出：dist\portable\WindowShare-Portable-<版本>.zip（含目录版）
 ```
 
 解压后直接双击 `启动-共享端.bat` / `启动-观看端.bat` 即可，**无需安装、无需 .NET 运行时**。
@@ -165,7 +165,7 @@ powershell -ExecutionPolicy Bypass -File scripts\build.ps1 -Portable
 | 界面提示 | Host 界面右上角显示「便携模式/安装模式」，📁 按钮直达数据目录 |
 
 ```
-WindowShare-Portable-1.2.0/
+WindowShare-Portable-<版本>/
 ├── WindowShare.Host.exe        共享端
 ├── WindowShare.Viewer.exe      观看端
 ├── data\                       便携数据（logs / config / recordings）
@@ -193,6 +193,11 @@ Host 界面勾选「编码验证(写H.264)」后开始共享，共享期间生�
 ffprobe -f h264 "%APPDATA%\WindowShare\recordings\share-*.h264"
 # 期望输出：Video: h264, yuv420p, 1280x720, 30 fps
 ```
+
+> ⚠️ **落盘提示**：该勾选是**持久化设置**（存于 `host-settings.json` 的 `RecordForValidation`），
+> 下次启动仍保持上次状态；开启期间按**全分辨率**写裸流，**没有大小上限、没有自动轮转/清理**。
+> 1080p 内容下约 **1–2 MB/s**，长时间共享容易累积到数百 MB（审计试运行前该目录已累计
+> 582 MB / 13 个文件）。仅做编码验证时建议用完即关，并定期清理 `recordings\`。
 
 ## 日志与数据位置
 
@@ -241,6 +246,8 @@ ffprobe -f h264 "%APPDATA%\WindowShare\recordings\share-*.h264"
 - 系统声音依赖本机存在可用的播放设备与 AAC 编/解码 MFT；任一缺失即自动降级为纯视频共享（只记日志，不弹窗）
 - 系统声音固定 48 kHz / 立体声 / AAC-LC 128 kbps，采集对象跟随「默认播放设备」，共享过程中切换默认设备需重新开始共享
 - FFmpeg 软解兜底为纯软件解码：1080p 在现代 CPU 上实时富余，极低功耗设备帧率可能受限（有可用 HEVC 解码 MFT 的机器走 MF 路径，不受影响）
+- 状态栏的「（编码器欠产出）」提示在**静态桌面内容**下会误报：NVENC 的真实 CBR 不会为空闲画面填充码率，实测码率低是内容简单的正常结果，不等于编码器故障（详见审计文档 §5.1）
+- 网络拥塞触发的**降分辨率目前不可逆**：一旦拥塞降档，本会话内输出分辨率不会恢复；`SetBitrate` 在 FFmpeg 厂商硬编路径上暂不生效（详见审计文档 §A3/§A4）
 
 ## 文档
 
@@ -248,6 +255,7 @@ ffprobe -f h264 "%APPDATA%\WindowShare\recordings\share-*.h264"
 - [部署指南（含 WSS / coturn）](docs/DEPLOY.md)
 - [测试指南](docs/TESTING.md)
 - [路线图](docs/ROADMAP.md)
+- [v1.5.2 试运行审计与修复排期](docs/AUDIT-v1.5.2.md)（实测数据 / 已知缺陷 / 安全发现 / 竞品对比）
 
 ---
 

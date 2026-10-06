@@ -6,24 +6,27 @@
 dotnet test
 ```
 
-覆盖范围：
+覆盖范围（按测试文件）：
 
-| 测试类 | 覆盖内容 |
-|--------|----------|
+| 测试文件 | 覆盖内容 |
+|----------|----------|
 | `FrameProtocolTests` | 帧头编解码往返、魔数校验、超长负载拒绝、未知类型拒绝、负载帧解析 |
 | `SecurityTests` | 房间号/密码字符集与长度、随机性、PBKDF2 确定性与盐相关性、常量时间比较、HMAC 确定性 |
+| `SecurityHardeningTests` | 认证限流（失败计数/冷却/成功清零）、连接上限判定、能力位版本协商边界 |
 | `StatsCollectorTests` | 码率/帧率计算、延迟 EWMA 收敛、无样本时 NaN |
 | `CongestionControllerTests` | 健康时维持、高 RTT 降码率、连续降档后降分辨率、最低档保护、高丢帧率触发降档、最小评估间隔、恢复不超初始值 |
 | `AppPathsTests` | 便携/安装模式数据目录决策、只读位置回退 `%APPDATA%`、环境变量优先级、设备 ID 稳定性 |
+| `JsonSettingsStoreTests` | 设置读写往返、损坏/缺字段的容错、并发写安全 |
 | `VideoFormatPlannerTests` | 帧率档位、4K 上限、等比缩放取偶且不上采样、码率推算边界与单调性、`SuggestH264Level` 各档位、Level 展示名 |
 | `GopCacheTests` | GOP 缓存：以 IDR 开头才可补发、新 IDR 开启新一轮、帧数/字节越界后等到下一个 IDR 再积累、分辨率切换作废缓存、快照与后续追加互不干扰 |
-| `AdtsTests` | ADTS 封装往返、44.1 kHz 与 5.1 的 `sampling_frequency_index`、超长裸帧与非法声道数拒绝、`TryReadHeader` 解析与各类非法头拒绝 |
-| `PcmConvertTests` | float32 ↔ int16 转换与削波（不环绕）、单声道→立体声、环绕声下混不越界、重采样恒等/半率/直流电平保持、立体声→单声道设备混音、多声道设备补静音、RMS 电平 |
-| `SampleTimelineTests` | 采集时间戳时间线：无标记时的行为、标记之间插值、首标记前外推、末标记后外推、乱序标记被忽略、长时间运行裁剪后仍准确、Reset 清空 |
-| `AvSyncClockTests` | 音画同步时钟：无音频时一律立即上屏、画面远早于音频时等待、阈值内上屏、落后于音频时立即上屏、首帧前时钟无效、更新之间外推、Reset 使时钟失效、视频偏移毫秒数符号 |
-| `AudioStreamInfoTests` | 音频流常量自洽（块长 / 块帧数 / 块时长）、格式标识对 ADTS 友好、非法采样率被拒 |
+| `AnnexBTests` | H.264/HEVC NAL 头解析、IRAP 关键帧判定、VPS/SPS/PPS 识别、Annex-B 遍历边界 |
+| `AudioTests` | ADTS 封装/解析与非法头拒绝、float32↔int16 转换与削波、重混/重采样、采集时间线（`SampleTimeline`）、音画同步时钟（`AvSyncClock`）、音频流常量自洽 |
+| `Yuv420pToBgraTests` | YUV420P→BGRA 转换、BT.709 系数、边界尺寸 |
+| `LanDiscoveryTests` | 组播 announce 编解码、魔数/版本校验、过期判据、名称与端口回退 |
+| `VideoEncoderFactoryTests` | 编码器候选链选择（厂商硬编 → MF 现链） |
+| `VideoDecoderFactoryTests` | 解码器候选链选择（MF → FFmpeg 兜底）、能力位联动 |
 
-期望结果：**136/136 通过**（其中音频相关 5 个测试类、44 项）。
+合计：**207 项**（`[Fact]` 140 + `[Theory]` 的 `[InlineData]` 67）。
 
 ## 2. 冒烟测试（真实捕获本机屏幕）
 
@@ -31,16 +34,19 @@ dotnet test
 dotnet run --project tools/WindowShare.SmokeTest
 ```
 
-会依次执行 7 个部分，全部 `PASS` 时退出码为 0：
+会依次执行 **11 项**，全部 `PASS` 时退出码为 0：
 
 | 部分 | 内容 | 通过标准 |
 |------|------|----------|
 | Part1 | 探测捕获引擎、捕获源、编码器清单，并逐档验证「分辨率 × 帧率」可配置（日志带推导出的 H.264 Level 与编码器实际接受的 Level） | 至少一种捕获引擎可用；720p30 / 1080p30 / 1080p60 / 1080p144 / 2K30 / 4K30 / 4K60 各档均可用 |
 | Part2 | 合成运动图像 → GPU NV12 → H.264 → 文件 | ≥45 帧、≥30KB、含 SPS/PPS |
 | Part2b | 4K（3840×2160@30）与高帧率（1280×720@120）编码 | 4K 输出分辨率正确且码流能解回 3840×2160（解码帧数 ≥ 编码帧数的 80%）；120fps 档实际编码帧率不超过目标的 135%（帧率节流生效） |
+| Part2c | HEVC 编解码往返（合成内容 → HEVC 编码 → 解码回读） | 本机无可用 HEVC 编码器时软性通过；有编码器时解码回读帧数与编码帧数一致（MF 探针失败走 FFmpeg 软解兜底，见 [AUDIT-v1.5.2.md](AUDIT-v1.5.2.md)） |
+| Part2d | FFmpeg 厂商硬编（`h264_nvenc`/`amf`/`qsv`）**真实 CBR** 断言 | 工厂选中厂商硬编时，实测码率/目标码率 **≥50%**，并用 FFmpeg 软解回读全部编码帧；本机无厂商 GPU 时软性通过 |
 | Part3 | 真实捕获主显示器（WGC + GDI 双引擎） | 至少一个引擎出帧并编码成功 |
 | Part4 | 回环端到端：ShareSession + LAN 服务器 → 客户端 + 解码器（GDI 定速捕获） | 连接成功、加密启用、收帧 ≥40、解码帧数 ≥ 首个 IDR 后可解码帧数的 90%、**收到的第一帧就是 IDR**（GOP 补发生效） |
-| Part5 | 信令服务器回环（含错误密码负向用例） | 错误密码被拒、审批通过、取到 LAN 端点 |
+| Part4b | HEVC 会话协商（负例 + 正例） | 负例：不支持 HEVC 解码的观看端必须被拒且**原因可读**（含"HEVC"字样）；正例：能力并集（MF 探针 ∥ FFmpeg 兜底）成立时正常接入并解码 |
+| Part5 | 信令服务器回环（含错误密码负向用例） | 错误密码被拒、审批通过、取到 LAN 端点。⚠️ **定位信令 dll 时按序尝试源码树 → `dist\publish\signaling\` → `AppContext.BaseDirectory\signaling\`**；对纯 `dist` 部署产物运行时，源码树路径不存在，缺兜底会误报 FAIL |
 | Part6 | WebRTC 回环（DTLS-SRTP + H.264 RTP，GDI 定速捕获） | 连接成功、收帧 ≥30、解码帧数 ≥ 投喂帧数的 90% |
 | Part7 | 系统声音：**7a** AAC 编解码往返（合成双声道正弦波 → AAC → 解回 PCM）、**7b** LAN 音频端到端（ShareSession → LanShareServer → LanShareClient → 解码）、**7c** WASAPI loopback 探测 | 7a：ADTS 头全部自描述且与帧长一致、时间戳严格递增、解回帧数 ≥ 输入的 85%、格式不符 0 块、RMS ∈ (0.05, 0.9)、左右声道过零比 ∈ (0.35, 0.70)（期望 ≈0.5，可抓住声道交换/被下混/重采样系数写错）；7b：加密开启、会话音频参数与约定一致、收帧 ≥50、ADTS 头非法 0、时间戳乱序 0、解码异常 0、解码块数 ≥ 收帧数的 80%；7c 为软性探测，不计入 Part7 通过条件 |
 | Part6（音频） | WebRTC 音频回环：合成音频走 AAC 动态 PT 97 → RTP/DTLS-SRTP → 裸 AAC 包回 ADTS → MF 解码 | 音频帧 ≥50、解码帧数 ≥ 收帧数的 90%（与视频断言合并为 Part6 通过条件；本机无 AAC 编码器时软性跳过） |
@@ -157,7 +163,7 @@ dotnet run --project src\WindowShare.Host -- --autotest
 powershell -ExecutionPolicy Bypass -File scripts\build.ps1 -Package
 ```
 
-- [ ] `installer\output\WindowShare-Setup-1.2.0.exe` 生成
+- [ ] `installer\output\WindowShare-Setup-<版本>.exe` 生成（如 `WindowShare-Setup-1.5.2.exe`）
 - [ ] 双击安装（无需管理员权限），开始菜单出现 Host / Viewer 快捷方式
 - [ ] 从开始菜单启动 Host，功能与开发构建一致
 - [ ] 卸载后 `%APPDATA%\WindowShare`（白名单/设置）保留，程序目录被清理

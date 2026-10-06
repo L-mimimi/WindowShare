@@ -63,10 +63,17 @@ Host 侧 `LanShareServer` 维护一份 GOP 缓存（`Core/Encoding/GopCache.cs`�
 | 时间戳 | 帧头 `TimestampUtc` = 该帧第一个采样点的**采集时刻**，与视频帧同一时钟 |
 | 方向 | 只有 Host → Viewer，协议中不存在任何音频回传消息 |
 
-Viewer 侧音画同步：以音频播放时钟为主时钟。解码后的视频帧不直接上屏，而是进有界队列，
-由独立的上屏线程按 `TimestampUtc` 对齐后再画（画面早于声音就等一会儿，晚于声音就立即画）；
-队列满时丢最旧的一帧保住实时性。音频不可用时（Host 未共享 / 用户取消勾选 / 本机没有播放
-设备或没有 AAC 解码 MFT），同步时钟置为失效，视频退回「解码完立即上屏」。
+Viewer 侧音画同步（**v1.5.2 起改为「视频自由上屏」**）：以音频播放时钟为主时钟，
+但**不再逐帧等待对齐**。1.5.1 及更早的实现让视频帧「等到点再画」（画面早于声音就等一会儿），
+而上屏率被音频管线的固有延迟（设备缓冲 100ms + 抖动缓冲 + 编解码/网络）钉死——实测 56fps
+解码只剩 8fps 上屏。现在改为：**解码出一帧就上屏一帧**（上屏率 = 解码率，无等待、无逐帧跳帧），
+音频时钟只用于在会话停顿后**丢弃严重滞后（落后音频时钟 > 500ms）的积压帧**。
+取舍：流畅与低延迟优先于逐帧 lip-sync 对齐（屏幕共享场景的声音主要是系统声/人声，
+恒定的轻微音画偏差远不如卡顿明显）。
+
+上屏队列仍为有界（`BlockingCollection<DecodedVideoFrame>`，容量 16），队列满时丢最旧的一帧保住实时性。
+音频不可用时（Host 未共享 / 用户取消勾选 / 本机没有播放设备或没有 AAC 解码 MFT），
+同步时钟置为失效，视频同样「解码完立即上屏」。
 
 解码侧的一个实现坑（1.2.0 实测）：`Microsoft AAC Audio Decoder MFT` 的
 `MFT_OUTPUT_STREAM_INFO.dwFlags` 报了 `MFT_OUTPUT_STREAM_PROVIDES_SAMPLES`，但
@@ -105,6 +112,20 @@ Viewer                                   Host
 - **连接上限**：未认证并发连接 ≤4，已认证观看者 ≤16，超出直接断开（不响应）。
 - **强制加密**：AuthChallenge 携带 `hostPub`（Host 提供加密能力）时，观看端 AuthProof 必须携带 `clientPub`，密钥派生失败或缺失公钥一律拒绝接入——不存在「认证通过后回退明文」的路径。
 - **帧头 AAD 绑定 + 防重放**：观看端在 AuthRequest 中携带 `ver`（应用版本），Host 对 `ver ≥ 1.3` 的观看端在 AuthResult 置 `aad=true`；此后两端加密均把 24 字节帧头（类型/标志/序号/时间戳/长度）作为 AAD 绑定进 GCM 认证，且接收端要求加密帧序号严格递增（重放即断连）。老版本观看端（不带 `ver`）自动维持旧的仅负载加密格式。
+
+> ⚠️ **已知局限（2026-10-06 v1.5.2 审计确认，尚未修复）**：上述 AAD/防重放**能力协商本身不受认证保护**。
+> 能力位来自 AuthRequest 的明文 `ver` 字段，而 `ComputeProof` 的 HMAC 输入是
+> `salt ‖ deviceId ‖ hostPub ‖ clientPub`——**不含版本或能力位**（`AuthPayloads.cs:132-143`），
+> AuthResult 同样是明文且无 MAC。因此在线中间人（如同网段 ARP 欺骗）只需删掉 `ver`、
+> 或把 AuthResult 的 `aad` 置 false，即可让两端**静默**关闭帧头 AAD 绑定与序号校验，全程无报错。
+> 注意这**不是加密降级**（缺 `clientPub` 时 Host 一律拒绝接入，不存在"认证通过后回退明文"的路径），
+> 而是**帧头完整性与防重放能力的降级**。修复方向：对 ≥1.3 的对端恒定启用 AAD（`ver` 仅用于
+> 拒绝过旧对端），或把能力位并入 HMAC transcript。详见
+> [AUDIT-v1.5.2.md §S4](AUDIT-v1.5.2.md#s4mediumaad-绑定与防重放可被未认证方静默降级与-protocol-承诺不符)。
+>
+> 另：加密启用后，`Ping`/`Pong`/`Bye`/`KeyframeRequest`/`ShareStopped` **既不发密文也接受明文**
+> （`TcpFrameConnection.cs:149-152,203-232`），在线中间人可注入伪造的 `StatsInfo`/`KeyframeRequest`/`Bye`。
+> 详见 [AUDIT-v1.5.2.md §S5](AUDIT-v1.5.2.md#s5medium加密启用后仍接受明文控制帧)。
 
 ## 3. 会话加密（LAN 可选）
 
