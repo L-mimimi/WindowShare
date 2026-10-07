@@ -6,21 +6,34 @@ Windows 只读屏幕/窗口共享软件：**Host 端**捕获整个屏幕或指�
 
 ## 下载（Windows x64）
 
-最新版本 **v1.5.2** ｜ [全部发布版本](https://github.com/L-mimimi/WindowShare/releases)
+最新版本 **v1.5.3** ｜ [全部发布版本](https://github.com/L-mimimi/WindowShare/releases)
 
 | 类型 | 文件 | 大小 | 说明 |
 |------|------|------|------|
-| 安装版 | [WindowShare-Setup-1.5.2.exe](https://github.com/L-mimimi/WindowShare/releases/download/v1.5.2/WindowShare-Setup-1.5.2.exe) | 110.1 MB | Inno Setup per-user 安装，**无需管理员权限**；数据写入 `%APPDATA%\WindowShare` |
-| 便携版 | [WindowShare-Portable-1.5.2.zip](https://github.com/L-mimimi/WindowShare/releases/download/v1.5.2/WindowShare-Portable-1.5.2.zip) | 153.6 MB | 解压即用，可放 U 盘；数据全部存于程序目录 `data\` |
+| 安装版 | [WindowShare-Setup-1.5.3.exe](https://github.com/L-mimimi/WindowShare/releases/download/v1.5.3/WindowShare-Setup-1.5.3.exe) | 110.1 MB | Inno Setup per-user 安装，**无需管理员权限**；数据写入 `%APPDATA%\WindowShare` |
+| 便携版 | [WindowShare-Portable-1.5.3.zip](https://github.com/L-mimimi/WindowShare/releases/download/v1.5.3/WindowShare-Portable-1.5.3.zip) | 153.6 MB | 解压即用，可放 U 盘；数据全部存于程序目录 `data\` |
 
 两者均为 self-contained（win-x64），目标机器**无需预装 .NET 运行时**。系统要求：Windows 10 1903（10.0.18362）或更高。
 
 校验（SHA256）：
 
 ```
-2db7bf1913be36f8f88d3fb3ea74b4b362d13b39ae277dbc7c032eb15e2f1e67  WindowShare-Setup-1.5.2.exe
-58c9a8b9118b33583c6c53ea994ae123c856c8b9cdcca69302f0e6d77d4ecaf1  WindowShare-Portable-1.5.2.zip
+168bc4c579e03f1434c364f03e9d951d026314f96dfe5bd96fff01b2a0ad1e53  WindowShare-Setup-1.5.3.exe
+c66daef64be875ca81a14072480fe64e2f93ce36b2672c7f55ecdc9e9e6e3cc9  WindowShare-Portable-1.5.3.zip
 ```
+
+## 1.5.3 更新
+
+- **修复 WGC 捕获侧内存增长（重要）**：捕获不节流，105fps 的帧全部走复制/转换后被编码层丢弃——78% 的帧白做，托管分配 8.3MB/s、托管堆峰值 161MB、工作集 ~466MB 且持续攀升。现在**捕获侧按目标帧率节流**（单点节流权威，取帧后仍正确释放池缓冲）。实测 5 分钟：累计分配 **↓89%**（2500→272MB）、堆峰值 **↓68%**（161→52MB）、工作集走平，上屏帧率无回退。
+- **修复托盘不可达（重要）**：托盘图标 `hWnd=0` 导致菜单/单击永无响应——默认「关闭时隐藏到托盘」下窗口唤不回、共享停不掉。已修复并校验所有 `Shell_NotifyIcon` 调用返回值。
+- **修复拥塞降档单向棘轮**：网络变差降档后**永不恢复**（分辨率档位回升分支失效）。现在降/升各档独立恢复，实测弱网后自动回升。
+- **修复画面底部多 8 行**：H.264 宏块对齐把 1080 填充成 1088，观看端整幅渲染出现绿边/杂行。现在 Host 经 `StatsInfo` 上报编码真实尺寸，观看端按真实尺寸裁剪显示。
+- **修复码率上报失真**：编码器不接受动态码率时不再误报「已降档」目标值。
+- **修复启动覆盖用户设置**：启动瞬间控件默认值会覆盖已保存的「关闭隐藏到托盘/局域网发现/分辨率」等设置，勾选下次启动丢失。
+- **修复 socket 释放**：对端断开路径下连接资源（socket/密钥/信号量）不再等待 GC 回收。
+- **音频假欠载修复**：抖动缓冲深度计数过减导致假欠载、自适应缓冲无谓加深——修复后 10 分钟带声音长会话实测：起播自愈后零欠载、零无谓加深。
+- 其他：冒烟测试不再依赖源码树 Debug 构建（`dist` 产物可直接跑）；Viewer 对旧版 Host 无尺寸上报时自动回退整幅渲染。
+- 单测 **215 项**（+8：连接生命周期/尺寸裁剪/拥塞恢复）、冒烟 11 项、UIA 回归全 PASS；10 分钟长会话实测上屏 21fps 与解码 1:1。
 
 ## 1.5.2 更新
 
